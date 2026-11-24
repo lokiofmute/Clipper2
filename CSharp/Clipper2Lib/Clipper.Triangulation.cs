@@ -551,42 +551,59 @@ namespace Clipper2Lib
       if (eBelow == null) return null;
 
       Vertex2 vBest = (eBelow.vT.pt.Y <= yAbove) ? eBelow.vB : eBelow.vT;
-      long xBest = vBest.pt.X;
-      long yBest = vBest.pt.Y;
 
-      e = firstActive;
-      if (xBest < xAbove)
+      // Make sure no active edge blocks the link from vAbove to vBest. A blocker either
+      // crosses the link or has an end lying on it, and each moves vBest, so the actives
+      // are checked again until the link is clear. (The one-pass check this replaces missed
+      // blockers seen before vBest moved, ends lying on the link, and, when vBest was to the
+      // right of vAbove or straight below it, every blocker, which gave overlapping triangles.)
+      int guard = allEdges.Count + 1;
+      bool moved = true;
+      while (moved && guard-- > 0)
       {
-        while (e != null)
+        moved = false;
+        for (e = firstActive; e != null; e = e.nextE)
         {
-          if (e.vR.pt.X > xBest && e.vL.pt.X < xAbove &&
-              e.vB.pt.Y > yAbove && e.vT.pt.Y < yBest &&
-              SegsIntersect(e.vB.pt, e.vT.pt, vBest.pt, vAbove.pt) == IntersectKind.intersect)
-          {
-            vBest = (e.vT.pt.Y > yAbove) ? e.vT : e.vB;
-            xBest = vBest.pt.X;
-            yBest = vBest.pt.Y;
-          }
-          e = e.nextE;
-        }
-      }
-      else
-      {
-        while (e != null)
-        {
-          if (e.vR.pt.X < xBest && e.vL.pt.X > xAbove &&
-              e.vB.pt.Y > yAbove && e.vT.pt.Y < yBest &&
-              SegsIntersect(e.vB.pt, e.vT.pt, vBest.pt, vAbove.pt) == IntersectKind.intersect)
-          {
-            vBest = (e.vT.pt.Y > yAbove) ? e.vT : e.vB;
-            xBest = vBest.pt.X;
-            yBest = vBest.pt.Y;
-          }
-          e = e.nextE;
+          Vertex2? vBlock = GetLinkBlocker(vAbove, vBest, e);
+          if (vBlock == null || vBlock == vBest) continue;
+          vBest = vBlock;
+          moved = true;
+          break;
         }
       }
 
       return CreateEdge(vBest, vAbove, EdgeKind.loose);
+    }
+
+    // returns the vertex the link (vAbove, vBest) should move to when edge e blocks it,
+    // or null when e doesn't block it
+    private static Vertex2? GetLinkBlocker(Vertex2 vAbove, Vertex2 vBest, Edge e)
+    {
+      Point64 a = vAbove.pt, b = vBest.pt;
+      if (e.vB == vAbove || e.vT == vAbove) return null;
+      if (Math.Max(e.vL.pt.X, e.vR.pt.X) < Math.Min(a.X, b.X) ||
+          Math.Min(e.vL.pt.X, e.vR.pt.X) > Math.Max(a.X, b.X) ||
+          e.vB.pt.Y < Math.Min(a.Y, b.Y) || e.vT.pt.Y > Math.Max(a.Y, b.Y)) return null;
+
+      // an end of e lying inside the link
+      if (e.vB != vBest && IsStrictlyInsideSegment(e.vB.pt, a, b)) return e.vB;
+      if (e.vT != vBest && IsStrictlyInsideSegment(e.vT.pt, a, b)) return e.vT;
+      if (e.vB == vBest || e.vT == vBest) return null;
+
+      // e properly crossing the link
+      int s1 = InternalClipper.CrossProductSign(a, b, e.vB.pt);
+      int s2 = InternalClipper.CrossProductSign(a, b, e.vT.pt);
+      int s3 = InternalClipper.CrossProductSign(e.vB.pt, e.vT.pt, a);
+      int s4 = InternalClipper.CrossProductSign(e.vB.pt, e.vT.pt, b);
+      if (s1 * s2 >= 0 || s3 * s4 >= 0) return null;
+      return (e.vT.pt.Y > a.Y) ? e.vT : e.vB;
+    }
+
+    private static bool IsStrictlyInsideSegment(Point64 pt, Point64 a, Point64 b)
+    {
+      if (pt == a || pt == b || InternalClipper.CrossProductSign(a, pt, b) != 0) return false;
+      return pt.X >= Math.Min(a.X, b.X) && pt.X <= Math.Max(a.X, b.X) &&
+        pt.Y >= Math.Min(a.Y, b.Y) && pt.Y <= Math.Max(a.Y, b.Y);
     }
 
     private Edge? HorizontalBetween(Vertex2 v1, Vertex2 v2)
