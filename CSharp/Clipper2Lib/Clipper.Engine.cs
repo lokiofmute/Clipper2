@@ -110,7 +110,8 @@ namespace Clipper2Lib
   {
     public readonly int Compare(LocalMinima locMin1, LocalMinima locMin2)
     {
-      return locMin2.vertex.pt.Y.CompareTo(locMin1.vertex.pt.Y);
+      int c = locMin2.vertex.pt.Y.CompareTo(locMin1.vertex.pt.Y);
+      return c != 0 ? c : locMin1.vertex.pt.X.CompareTo(locMin2.vertex.pt.X);
     }
   }
 
@@ -243,18 +244,21 @@ namespace Clipper2Lib
       foreach (Path64 path in paths)
       {
         Vertex? v0 = null, prev_v = null, curr_v;
+        int cnt = 0;
         foreach (Point64 pt in path)
         {
           if (v0 == null)
           {
             v0 = vertexList.Add(pt, VertexFlags.None, null);
             prev_v = v0;
+            cnt++;
           }
           else if (prev_v!.pt != pt) // ie skips duplicates
           {
             curr_v = vertexList.Add(pt, VertexFlags.None, prev_v);
             prev_v.next = curr_v;
             prev_v = curr_v;
+            cnt++;
           }
         }
         if (prev_v?.prev == null) continue;
@@ -262,6 +266,7 @@ namespace Clipper2Lib
         prev_v.next = v0;
         v0!.prev = prev_v;
         if (!isOpen && prev_v.next == prev_v) continue;
+        if (cnt < 2 || (cnt == 2 && !isOpen)) continue;
 
         // OK, we have a valid path
         bool going_up;
@@ -624,6 +629,49 @@ namespace Clipper2Lib
       }
     }
 
+    private IntersectNode[] _intersectBuffer = Array.Empty<IntersectNode>();
+
+    // a bottom-up merge sort, stable like the C++ std::stable_sort (f774daf)
+    private void StableSortIntersectList()
+    {
+      int n = _intersectList.Count;
+      if (n < 2) return;
+      IntersectListSort cmp = new IntersectListSort();
+      if (n <= 16)
+      {
+        // insertion sort is stable and cheap for the usual short lists
+        for (int i = 1; i < n; i++)
+        {
+          IntersectNode node = _intersectList[i];
+          int j = i - 1;
+          while (j >= 0 && cmp.Compare(_intersectList[j], node) > 0)
+          {
+            _intersectList[j + 1] = _intersectList[j];
+            j--;
+          }
+          _intersectList[j + 1] = node;
+        }
+        return;
+      }
+      if (_intersectBuffer.Length < 2 * n) _intersectBuffer = new IntersectNode[2 * n];
+      _intersectList.CopyTo(_intersectBuffer, 0);
+      Span<IntersectNode> a = _intersectBuffer.AsSpan(0, n), b = _intersectBuffer.AsSpan(n, n);
+      for (int width = 1; width < n; width *= 2)
+      {
+        for (int lo = 0; lo < n; lo += 2 * width)
+        {
+          int mid = Math.Min(lo + width, n), hi = Math.Min(lo + 2 * width, n);
+          int i = lo, j = mid, k = lo;
+          while (i < mid && j < hi)
+            b[k++] = (cmp.Compare(a[j], a[i]) < 0) ? a[j++] : a[i++];
+          while (i < mid) b[k++] = a[i++];
+          while (j < hi) b[k++] = a[j++];
+        }
+        Span<IntersectNode> t = a; a = b; b = t;
+      }
+      for (int i = 0; i < n; i++) _intersectList[i] = a[i];
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void SetSides(OutRec outrec, Active startEdge, Active endEdge)
     {
@@ -782,7 +830,18 @@ namespace Clipper2Lib
     {
       if (!_isSortedMinimaList)
       {
-        _minimaList.Sort(new LocMinSorter());
+        // stable, like the C++ std::stable_sort (#594): minima at the same y keep
+        // the order they were added in (List.Sort is unstable)
+        LocalMinima[] sorted = _minimaList.ToArray();
+        int[] order = new int[sorted.Length];
+        for (int i = 0; i < order.Length; i++) order[i] = i;
+        LocMinSorter sorter = new LocMinSorter();
+        Array.Sort(order, (a, b) =>
+        {
+          int c = sorter.Compare(sorted[a], sorted[b]);
+          return c != 0 ? c : a.CompareTo(b);
+        });
+        for (int i = 0; i < order.Length; i++) _minimaList[i] = sorted[order[i]];
         _isSortedMinimaList = true;
       }
 
@@ -1332,7 +1391,6 @@ namespace Clipper2Lib
         {
           if (_using_polytree)
             SetOwner(outrec, prevHotEdge.outrec!);
-          outrec.owner = prevHotEdge.outrec;
           if (OutrecIsAscending(prevHotEdge) == isNew)
             SetSides(outrec, ae2, ae1);
           else
@@ -1389,6 +1447,8 @@ namespace Clipper2Lib
           // owner but this will be fixed in DeepCheckOwner()
         }
         UncoupleOutRec(ae1);
+        if (outrec.owner != null && outrec.owner.frontEdge == null)
+          outrec.owner = GetRealOutRec(outrec.owner);
       }
       // and to preserve the winding orientation of outrec ...
       else if (IsOpen(ae1))
@@ -1443,13 +1503,14 @@ namespace Clipper2Lib
       ae2.outrec.backEdge = null;
       ae2.outrec.pts = null;
       ae1.outrec.outPtCount += ae2.outrec.outPtCount;
-      SetOwner(ae2.outrec, ae1.outrec);
 
       if (IsOpenEnd(ae1))
       {
         ae2.outrec.pts = ae1.outrec.pts;
         ae1.outrec.pts = null;
       }
+      else
+        SetOwner(ae2.outrec, ae1.outrec);
 
       // and ae1 and ae2 are maxima and are about to be dropped from the Actives list.
       ae1.outrec = null;
@@ -1532,6 +1593,26 @@ namespace Clipper2Lib
         return; 
       }
       InsertScanline(ae.top.Y);
+
+      // rounded TopX values can hide a wrong order between edges leaving a shared
+      // vertex, so restore their order here rather than crossing them further on
+      Active? prev = ae.prevInAEL;
+      while (prev != null && prev.bot == ae.bot && !IsHorizontal(prev) &&
+        InternalClipper.CrossProductSign(prev.top, ae.bot, ae.top) > 0)
+      {
+        IntersectEdges(prev, ae, ae.bot);
+        SwapPositionsInAEL(prev, ae);
+        prev = ae.prevInAEL;
+      }
+
+      Active? next = ae.nextInAEL;
+      while (next != null && next.bot == ae.bot && !IsHorizontal(next) &&
+        InternalClipper.CrossProductSign(next.top, ae.bot, ae.top) < 0)
+      {
+        IntersectEdges(ae, next, ae.bot);
+        SwapPositionsInAEL(ae, next);
+        next = ae.nextInAEL;
+      }
 
       CheckJoinLeft(ae, ae.bot);
       CheckJoinRight(ae, ae.bot, true); // (#500)
@@ -1785,8 +1866,8 @@ namespace Clipper2Lib
           switch (_cliptype)
           {
             case ClipType.Union:
-              if (e1Wc2 > 0 && e2Wc2 > 0) return;
-              resultOp = AddLocalMinPoly(ae1, ae2, pt);
+              if (e1Wc2 <= 0 && e2Wc2 <= 0)
+                resultOp = AddLocalMinPoly(ae1, ae2, pt);
               break;
 
             case ClipType.Difference:
@@ -1941,37 +2022,28 @@ namespace Clipper2Lib
         ae1.bot, ae1.top, ae2.bot, ae2.top, out Point64 ip))
           ip = new Point64(ae1.curX, topY);
 
+      // rounding errors can occasionally place the calculated intersection
+      // point either below or above the scanbeam, so check and correct ...
       if (ip.Y > _currentBotY || ip.Y < topY)
       {
         double absDx1 = Math.Abs(ae1.dx);
         double absDx2 = Math.Abs(ae2.dx);
-        switch (absDx1 > 100)
+        if (absDx1 > 100 || absDx2 > 100)
         {
-          case true when absDx2 > 100:
-          {
-            if (absDx1 > absDx2)
-              ip = InternalClipper.GetClosestPtOnSegment(ip, ae1.bot, ae1.top);
-            else
-              ip = InternalClipper.GetClosestPtOnSegment(ip, ae2.bot, ae2.top);
-            break;
-          }
-          case true:
-            ip = InternalClipper.GetClosestPtOnSegment(ip, ae1.bot, ae1.top);
-            break;
-          default:
-          {
-            if (absDx2 > 100)
-              ip = InternalClipper.GetClosestPtOnSegment(ip, ae2.bot, ae2.top);
-            else
-            {
-              if (ip.Y < topY) ip.Y = topY;
-              else ip.Y = _currentBotY;
-              if (absDx1 < absDx2) ip.X = TopX(ae1, ip.Y);
-              else ip.X = TopX(ae2, ip.Y);
-            }
-
-            break;
-          }
+          // move onto the flatter edge, using only its part inside the scanbeam since
+          // near parallel edges can meet far beyond it
+          Active ae = (absDx1 > absDx2) ? ae1 : ae2;
+          ip = InternalClipper.GetClosestPtOnSegment(ip,
+            new Point64(TopX(ae, _currentBotY), _currentBotY), new Point64(TopX(ae, topY), topY));
+          // the projection is rounded in double, which can overshoot with huge coordinates
+          ip.Y = Math.Clamp(ip.Y, topY, _currentBotY);
+        }
+        else
+        {
+          if (ip.Y < topY) ip.Y = topY;
+          else ip.Y = _currentBotY;
+          if (absDx1 < absDx2) ip.X = TopX(ae1, ip.Y);
+          else ip.X = TopX(ae2, ip.Y);
         }
       }
       IntersectNode node = new IntersectNode(ip, ae1, ae2);
@@ -2072,7 +2144,9 @@ namespace Clipper2Lib
       // crucial that intersections only occur between adjacent edges.
 
       // First we do a quicksort so intersections proceed in a bottom up order ...
-      _intersectList.Sort(new IntersectListSort());
+      // The sort is stable because the order of intersections at the same point
+      // changes the output (List.Sort is unstable) ...
+      StableSortIntersectList();
 
       // Now as we process these intersections, we must sometimes adjust the order
       // to ensure that intersecting edges are always adjacent ...
@@ -2484,7 +2558,7 @@ private void DoHorizontal(Active horz)
 
       if (checkCurrX)
       {
-        if (Clipper.PerpendicDistFromLineSqrd(pt, next.bot, next.top) > 0.25) return;
+        if (Clipper.PerpendicDistFromLineSqrd(pt, next.bot, next.top) > 0.35) return;
       }
       else if (e.curX != next.curX) return;
       if (!InternalClipper.IsCollinear(e.top, pt, next.top)) return;
@@ -2602,7 +2676,16 @@ private void DoHorizontal(Active horz)
       foreach (HorzSegment hs in _horzSegList)
         if (UpdateHorzSegment(hs)) k++;
       if (k < 2) return;
-      _horzSegList.Sort(HorzSegSort);
+      // stable, like the C++ std::stable_sort (List.Sort is unstable)
+      HorzSegment[] segs = _horzSegList.ToArray();
+      int[] order = new int[segs.Length];
+      for (int i = 0; i < order.Length; i++) order[i] = i;
+      Array.Sort(order, (a, b) =>
+      {
+        int c = HorzSegSort(segs[a], segs[b]);
+        return c != 0 ? c : a.CompareTo(b);
+      });
+      for (int i = 0; i < order.Length; i++) _horzSegList[i] = segs[order[i]];
 
       for (int i = 0; i < k -1; i++)
       {
@@ -2852,8 +2935,8 @@ private void DoHorizontal(Active horz)
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsValidClosedPath(OutPt? op)
     {
-      return (op != null && op.next != op &&
-        (op.next != op.prev || !IsVerySmallTriangle(op)));
+      return op != null && op.next != op && op.next != op.prev &&
+        !IsVerySmallTriangle(op);
     }
 
     
@@ -2956,7 +3039,7 @@ private void DoHorizontal(Active horz)
       // So the only way for these areas to have the same sign is if
       // the split triangle is larger than the path containing prevOp or
       // if there's more than one self=intersection.
-      if (!(absArea2 > 1) ||
+      if (!(absArea2 >= 1) ||
           (!(absArea2 > absArea1) &&
            ((area2 > 0) != (area1 > 0)))) return;
       OutRec newOutRec = NewOutRec();
@@ -3135,6 +3218,7 @@ private void DoHorizontal(Active horz)
         if (outrec.owner.splits != null && 
           CheckSplitOwner(outrec, outrec.owner.splits)) break; 
         if (outrec.owner.pts != null && CheckBounds(outrec.owner) &&
+          outrec.owner.bounds.Contains(outrec.bounds) &&
           Path1InsidePath2(outrec.pts!, outrec.owner.pts!)) break;
         outrec.owner = outrec.owner.owner;
       }

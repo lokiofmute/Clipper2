@@ -80,5 +80,17 @@ namespace Clipper2Lib.UnitTests
       Assert.AreEqual(1, solution.Count);
       Assert.AreEqual(Clipper.IsPositive(subject), Clipper.IsPositive(solution[0]));
     }
+
+    [TestMethod]
+    public void TestRectClipSharedEdge()
+    {
+      // the shared edge crosses the top of the rect at exactly x = 7.5, and the two triangles
+      // give it in opposite directions, so both must round that crossing to the same point
+      Rect64 rect = new(-10, 115, 30, 150);
+      Paths64 adjacent = Ps(P(0, 100, 11, 122, 0, 144), P(11, 122, 0, 100, 11, 78));
+      Paths64 separate = Clipper.RectClip(rect, adjacent);
+      Paths64 merged = Clipper.RectClip(rect, Clipper.Union(adjacent, FillRule.NonZero));
+      Assert.AreEqual(Clipper.Area(merged), Clipper.Area(separate));
+    }
   }
 }

@@ -644,9 +644,18 @@ namespace Clipper2Lib
     // seg2, even when 'ip' hasn't been constrained (ie 'ip' is inside seg1).
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool GetLineIntersectPt(Point64 ln1a,
-      Point64 ln1b, Point64 ln2a, Point64 ln2b, out Point64 ip)
+    public static bool GetLineIntersectPt(Point64 seg1a,
+      Point64 seg1b, Point64 seg2a, Point64 seg2b, out Point64 ip)
     {
+      // integer segments are evaluated from their bottom end, as the sweep does, so that
+      // a shared edge rounds to the same point whichever way round it is given
+      bool rev1 = seg1b.Y > seg1a.Y || (seg1b.Y == seg1a.Y && seg1b.X < seg1a.X);
+      bool rev2 = seg2b.Y > seg2a.Y || (seg2b.Y == seg2a.Y && seg2b.X < seg2a.X);
+      Point64 ln1a = rev1 ? seg1b : seg1a;
+      Point64 ln1b = rev1 ? seg1a : seg1b;
+      Point64 ln2a = rev2 ? seg2b : seg2a;
+      Point64 ln2b = rev2 ? seg2a : seg2b;
+
       double dy1 = (ln1b.Y - ln1a.Y);
       double dx1 = (ln1b.X - ln1a.X);
       double dy2 = (ln2b.Y - ln2a.Y);
@@ -663,9 +672,10 @@ namespace Clipper2Lib
       else if (t >= 1.0) ip = ln1b;
       else
       {
-        // avoid using constructor (and rounding too) as they affect performance //664
-        ip.X = (long) (ln1a.X + t * dx1);
-        ip.Y = (long) (ln1a.Y + t * dy1);
+        // rounding rather than truncating toward zero keeps 'ip' within half a unit, and
+        // rounding the absolute value resolves an exact tie the same way for any segment
+        ip.X = RoundToInt64(ln1a.X + t * dx1);
+        ip.Y = RoundToInt64(ln1a.Y + t * dy1);
 #if USINGZ
         ip.Z = 0;
 #endif
@@ -770,11 +780,8 @@ namespace Clipper2Lib
       double q = ((offPt.X - seg1.X) * dx +
         (offPt.Y - seg1.Y) * dy) / ((dx*dx) + (dy*dy));
       if (q < 0) q = 0; else if (q > 1) q = 1;
-      return new Point64(
-        // use MidpointRounding.ToEven in order to explicitly match the nearbyint behaviour on the C++ side
-        seg1.X + Math.Round(q * dx, MidpointRounding.ToEven),
-        seg1.Y + Math.Round(q * dy, MidpointRounding.ToEven)
-      );
+      // added in 64 bits, as C++ does, so that huge coordinates keep their precision
+      return new Point64(seg1.X + RoundToInt64(q * dx), seg1.Y + RoundToInt64(q * dy));
     }
 
     public static PointInPolygonResult PointInPolygon(Point64 pt, Path64 polygon)
