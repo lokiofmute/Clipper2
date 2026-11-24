@@ -3327,6 +3327,8 @@ private void DoHorizontal(Active horz)
     {
       solutionClosed.Clear();
       solutionOpen.Clear();
+      // as in C++, each Execute sets the mode, so a PolyTree Execute doesn't leak into this one
+      _using_polytree = false;
       try
       {
         ExecuteInternal(clipType, fillRule);
@@ -3490,6 +3492,8 @@ private void DoHorizontal(Active horz)
       bool success = true;
       solutionClosed.Clear();
       solutionOpen.Clear();
+      // as in C++, each Execute sets the mode, so a PolyTree Execute doesn't leak into this one
+      _using_polytree = false;
       try
       {
         ExecuteInternal(clipType, fillRule);
