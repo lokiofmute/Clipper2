@@ -607,5 +607,106 @@ namespace Clipper2Lib.UnitTests
       double area2 = Math.Abs(Clipper.Area(solution2));
       Assert.AreEqual(122, area2);
     }
+
+    [TestMethod]
+    public void TestOffsetsJoinedTwoPointPathOrder()
+    {
+      // a 2-point joined path gets open path ends, which must not carry over to the next path
+      Path64 two = P(0, 0, 100, 0);
+      Path64 tri = P(0, 1000, 500, 1000, 500, 1500);
+      double triFirst = Clipper.Area(Clipper.InflatePaths(Ps(tri, two), 20, JoinType.Miter, EndType.Joined));
+      double twoFirst = Clipper.Area(Clipper.InflatePaths(Ps(two, tri), 20, JoinType.Miter, EndType.Joined));
+      Assert.AreEqual(73268.5, triFirst);
+      Assert.AreEqual(triFirst, twoFirst);
+    }
+
+    [TestMethod]
+    public void TestOffsetsDegenerateGroupKeepsDeltaSign()
+    {
+      // a polygon group without a closed path is always inflated, but later groups must still shrink
+      Path64 line = P(0, 500, 100, 500);
+      Path64 square = P(0, 0, 100, 0, 100, 100, 0, 100);
+
+      ClipperOffset lineOffset = new();
+      lineOffset.AddPath(line, JoinType.Miter, EndType.Polygon);
+      Paths64 lineSolution = new();
+      lineOffset.Execute(-10, lineSolution);
+
+      ClipperOffset squareOffset = new();
+      squareOffset.AddPath(square, JoinType.Miter, EndType.Polygon);
+      Paths64 squareSolution = new();
+      squareOffset.Execute(-10, squareSolution);
+      Assert.AreEqual(6400, Clipper.Area(squareSolution));
+
+      ClipperOffset bothOffset = new();
+      bothOffset.AddPath(line, JoinType.Miter, EndType.Polygon);
+      bothOffset.AddPath(square, JoinType.Miter, EndType.Polygon);
+      Paths64 bothSolution = new();
+      bothOffset.Execute(-10, bothSolution);
+      Assert.AreEqual(Clipper.Area(lineSolution) + Clipper.Area(squareSolution), Clipper.Area(bothSolution));
+    }
+
+    private static double OffsetWithDeltaCallback20(Paths64 paths)
+    {
+      ClipperOffset offset = new();
+      offset.AddPaths(paths, JoinType.Round, EndType.Joined);
+      offset.DeltaCallback = (path, norms, curr, prev) => 20.0;
+      Paths64 solution = new();
+      offset.Execute(1.0, solution);
+      return Clipper.Area(solution);
+    }
+
+    [TestMethod]
+    public void TestOffsetsDeltaCallbackRoundPointOrder()
+    {
+      // a single point must be rounded for its own delta, not the arc steps left by an earlier path
+      Path64 point = P(0, 0);
+      Path64 line = P(0, 1000, 100, 1000);
+      Assert.AreEqual(OffsetWithDeltaCallback20(Ps(point, line)), OffsetWithDeltaCallback20(Ps(line, point)));
+    }
+
+    [TestMethod]
+    public void TestOffsetsSinglePointDeltaCallbackNormals()
+    {
+      ClipperOffset offset = new();
+      // the points come before and after a longer path so neither can see another path's normals
+      offset.AddPaths(Ps(P(0, 0), P(100, 0, 200, 0, 200, 100), P(500, 500)), JoinType.Square, EndType.Polygon);
+      bool normalsMatchPath = true;
+      offset.DeltaCallback = (path, pathNorms, curr, prev) =>
+      {
+        normalsMatchPath = normalsMatchPath && pathNorms.Count == path.Count;
+        return 10.0;
+      };
+      Paths64 solution = new();
+      offset.Execute(1.0, solution);
+      Assert.IsTrue(normalsMatchPath);
+      Assert.AreEqual(3, solution.Count);
+    }
+
+    [TestMethod]
+    public void TestOffsetsEmptyOpenPath()
+    {
+      Paths64 line = Ps(P(0, 0, 10, 0));
+      Paths64 lineAndEmpty = Ps(new Path64(), P(0, 0, 10, 0));
+      foreach (EndType et in new[] { EndType.Joined, EndType.Butt, EndType.Square, EndType.Round })
+      {
+        Assert.AreEqual(
+          Clipper.Paths64ToString(Clipper.InflatePaths(line, 10, JoinType.Square, et)),
+          Clipper.Paths64ToString(Clipper.InflatePaths(lineAndEmpty, 10, JoinType.Square, et)), et.ToString());
+      }
+    }
+
+    [TestMethod]
+    public void TestOffsetsEmptyGroupOrientation()
+    {
+      // an empty group has no orientation and must not decide the orientation of the solution
+      Path64 clockwiseSquare = P(0, 0, 0, 100, 100, 100, 100, 0);
+      ClipperOffset offset = new();
+      offset.AddPath(new Path64(), JoinType.Miter, EndType.Polygon);
+      offset.AddPath(clockwiseSquare, JoinType.Miter, EndType.Polygon);
+      Paths64 solution = new();
+      offset.Execute(10, solution);
+      Assert.AreEqual(-14400, Clipper.Area(solution));
+    }
   }
 }
