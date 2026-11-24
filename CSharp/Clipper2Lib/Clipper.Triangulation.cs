@@ -1013,7 +1013,9 @@ namespace Clipper2Lib
           Node? n = RemoveDegenerate(next, index);
           if (n != null) n = RemoveDegenerate(n.prev, index);
           if (n == null) return true; // nothing with area is left
-          ear = n.next;
+          // try the vertex after next first, as earcut does: continuing at the next vertex
+          // clips a fan around the previous one, whose slivers span the ring
+          ear = n.next.next;
           stop = ear;
           filtered = false;
           continue;
