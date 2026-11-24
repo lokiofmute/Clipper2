@@ -37,7 +37,9 @@ namespace Clipper2Lib
       public Point64 pt;
       public Node prev = null!;
       public Node next = null!;
-      public bool merged; // while bridging: part of the outer ring (holes bridged in so far)
+      public bool merged;  // while bridging: part of the outer ring (holes bridged in so far)
+      public bool removed; // while ear clipping: no longer in the ring
+      public int stamp;    // while ear clipping: the last IsEar query that visited its edge
       public Node(Point64 pt) { this.pt = pt; }
     }
 
@@ -69,6 +71,52 @@ namespace Clipper2Lib
 
       private int RowAt(double y) => (int) Math.Clamp(Math.Floor(y / size), 0, rows - 1);
       private int ColAt(double x) => (int) Math.Clamp(Math.Floor(x / size), 0, cols - 1);
+
+      // every cell the closed triangle (a, b, c) overlaps, and some next to them: per row of
+      // cells, the triangle's x range in that row is found in double, with a cell of slack on
+      // each side for its rounding
+      public void TriangleCells(Point64 a, Point64 b, Point64 c, List<int> cells)
+      {
+        cells.Clear();
+        int r0 = Row(Math.Min(a.Y, Math.Min(b.Y, c.Y))), r1 = Row(Math.Max(a.Y, Math.Max(b.Y, c.Y)));
+        int c0 = Col(Math.Min(a.X, Math.Min(b.X, c.X))), c1 = Col(Math.Max(a.X, Math.Max(b.X, c.X)));
+        if (r0 == r1 || c1 - c0 <= 1)
+        {
+          for (int r = r0; r <= r1; r++)
+            for (int col = c0; col <= c1; col++) cells.Add(r * cols + col);
+          return;
+        }
+        // offsets from the grid's corner, so they stay small enough for doubles
+        double ax = a.X - left, ay = a.Y - top, bx = b.X - left, by = b.Y - top, cx = c.X - left, cy = c.Y - top;
+        for (int r = r0; r <= r1; r++)
+        {
+          double y1 = (double) r * size, y2 = (double) (r + 1) * size;
+          double lo = double.MaxValue, hi = double.MinValue;
+          ClipToRow(ax, ay, bx, by, y1, y2, ref lo, ref hi);
+          ClipToRow(bx, by, cx, cy, y1, y2, ref lo, ref hi);
+          ClipToRow(cx, cy, ax, ay, y1, y2, ref lo, ref hi);
+          if (lo > hi) continue;
+          int ca = Math.Max(c0, ColAt(lo) - 1), cb = Math.Min(c1, ColAt(hi) + 1);
+          for (int col = ca; col <= cb; col++) cells.Add(r * cols + col);
+        }
+      }
+
+      // widens lo..hi by the x range of segment p-q within y1..y2
+      private static void ClipToRow(double px, double py, double qx, double qy, double y1, double y2,
+        ref double lo, ref double hi)
+      {
+        if (Math.Max(py, qy) < y1 || Math.Min(py, qy) > y2) return;
+        double xa, xb;
+        if (py == qy) { xa = px; xb = qx; }
+        else
+        {
+          double ta = Math.Clamp((y1 - py) / (qy - py), 0, 1), tb = Math.Clamp((y2 - py) / (qy - py), 0, 1);
+          xa = px + ta * (qx - px);
+          xb = px + tb * (qx - px);
+        }
+        lo = Math.Min(lo, Math.Min(xa, xb));
+        hi = Math.Max(hi, Math.Max(xa, xb));
+      }
 
       // every cell segment a-b passes through, and some next to them: the line is followed
       // in double, with a cell of slack on each side for its rounding
@@ -141,6 +189,13 @@ namespace Clipper2Lib
       public int First(int cell) => head[cell];
       public int Next(int entry) => link[entry];
       public T this[int entry] => items[entry];
+
+      // takes entry out of its cell's list, where prev is the entry before it (or -1)
+      public void Unlink(int cell, int prev, int entry)
+      {
+        if (prev < 0) head[cell] = link[entry];
+        else link[prev] = link[entry];
+      }
     }
 
     internal TriangulateResult Execute(Paths64 paths, out Paths64 sol)
@@ -712,36 +767,54 @@ namespace Clipper2Lib
     // true when the triangle (a, b, c) at node ear can be clipped: it is convex, no other
     // vertex lies inside it or on its edges, no edge crosses its diagonal a-c, and no edge
     // from a copy of one of its corners (where a ring touches itself, or at a bridge) enters it
-    private static bool IsEar(Node ear)
+    private static bool IsEar(Node ear, EarIndex? index)
     {
       Point64 a = ear.prev.pt, b = ear.pt, c = ear.next.pt;
       if (InternalClipper.CrossProductSign(a, b, c) <= 0) return false; // reflex or flat
+#if TRI_CHECK
+      if (index != null)
+      {
+        bool fast = index.IsEar(ear);
+        if (fast != IsEar(ear, null)) throw new InvalidOperationException($"EarIndex disagrees at {b.X},{b.Y}");
+        return fast;
+      }
+#else
+      if (index != null) return index.IsEar(ear);
+#endif
 
       long minX = Math.Min(a.X, Math.Min(b.X, c.X)), maxX = Math.Max(a.X, Math.Max(b.X, c.X));
       long minY = Math.Min(a.Y, Math.Min(b.Y, c.Y)), maxY = Math.Max(a.Y, Math.Max(b.Y, c.Y));
       for (Node p = ear.next.next; p != ear.prev; p = p.next)
       {
-        Point64 q = p.pt, r = p.next.pt;
-
-        // the edge p -> p.next crossing the diagonal
-        if (Math.Max(q.X, r.X) >= minX && Math.Min(q.X, r.X) <= maxX &&
-            Math.Max(q.Y, r.Y) >= minY && Math.Min(q.Y, r.Y) <= maxY &&
-            q != a && q != c && r != a && r != c &&
-            InternalClipper.CrossProductSign(a, c, q) * InternalClipper.CrossProductSign(a, c, r) < 0 &&
-            InternalClipper.CrossProductSign(q, r, a) * InternalClipper.CrossProductSign(q, r, c) < 0)
-          return false;
-
-        if (q.X < minX || q.X > maxX || q.Y < minY || q.Y > maxY) continue;
-        if (q == a || q == b || q == c)
-        {
-          if (EntersCorner(a, b, c, q, p.prev.pt) || EntersCorner(a, b, c, q, p.next.pt)) return false;
-          continue;
-        }
-        if (InternalClipper.CrossProductSign(a, b, q) >= 0 &&
-            InternalClipper.CrossProductSign(b, c, q) >= 0 &&
-            InternalClipper.CrossProductSign(c, a, q) >= 0) return false;
+        if (CrossesDiagonal(a, c, p.pt, p.next.pt, minX, maxX, minY, maxY)) return false;
+        if (BlocksEar(a, b, c, p, minX, maxX, minY, maxY)) return false;
       }
       return true;
+    }
+
+    // true when edge q-r crosses the diagonal a-c of an ear with bounds min/maxX, min/maxY
+    private static bool CrossesDiagonal(Point64 a, Point64 c, Point64 q, Point64 r,
+      long minX, long maxX, long minY, long maxY)
+    {
+      return Math.Max(q.X, r.X) >= minX && Math.Min(q.X, r.X) <= maxX &&
+        Math.Max(q.Y, r.Y) >= minY && Math.Min(q.Y, r.Y) <= maxY &&
+        q != a && q != c && r != a && r != c &&
+        InternalClipper.CrossProductSign(a, c, q) * InternalClipper.CrossProductSign(a, c, r) < 0 &&
+        InternalClipper.CrossProductSign(q, r, a) * InternalClipper.CrossProductSign(q, r, c) < 0;
+    }
+
+    // true when vertex p (not a corner node of the ear) lies inside the ear (a, b, c) or on its
+    // edges, or is a copy of a corner with an edge entering the ear
+    private static bool BlocksEar(Point64 a, Point64 b, Point64 c, Node p,
+      long minX, long maxX, long minY, long maxY)
+    {
+      Point64 q = p.pt;
+      if (q.X < minX || q.X > maxX || q.Y < minY || q.Y > maxY) return false;
+      if (q == a || q == b || q == c)
+        return EntersCorner(a, b, c, q, p.prev.pt) || EntersCorner(a, b, c, q, p.next.pt);
+      return InternalClipper.CrossProductSign(a, b, q) >= 0 &&
+        InternalClipper.CrossProductSign(b, c, q) >= 0 &&
+        InternalClipper.CrossProductSign(c, a, q) >= 0;
     }
 
     // true when the edge from corner k of the counter-clockwise triangle (a, b, c) towards q
@@ -755,16 +828,105 @@ namespace Clipper2Lib
       return InternalClipper.CrossProductSign(c, a, q) > 0 && InternalClipper.CrossProductSign(b, c, q) > 0;
     }
 
-    private static void Remove(Node n)
+    // Rings at least this long are ear clipped with an EarIndex; below it, scanning the
+    // whole ring is cheaper than building the grid (measured: a 200 node ring clips twice
+    // as fast without it, a 2900 node ring twice as fast with it). TRI_CHECK builds use
+    // the index for every ring and compare each answer with the whole ring scan.
+#if TRI_CHECK
+    private const int EarIndexMinNodes = 4;
+#else
+    private const int EarIndexMinNodes = 512;
+#endif
+
+    // The vertices and edges of a ring being ear clipped, in a grid, so IsEar visits only the
+    // cells under the ear's bounds instead of the whole ring. Each edge is registered in every
+    // cell it passes through, and each Remove registers the edge it makes, so the cells hold
+    // every vertex and edge the whole ring scan would find within the bounds, and IsEar gives
+    // the same answer. Entries for removed nodes and replaced edges are skipped.
+    private sealed class EarIndex
+    {
+      private readonly Grid grid;
+      private readonly CellLists<Node> vertices;
+      private readonly CellLists<(Node start, Node end)> edges;
+      private readonly List<int> cells = new List<int>();
+      private int stamp;
+
+      public EarIndex(Node ring, int n)
+      {
+        long left = long.MaxValue, top = long.MaxValue, right = long.MinValue, bottom = long.MinValue;
+        Node p = ring;
+        do
+        {
+          left = Math.Min(left, p.pt.X); right = Math.Max(right, p.pt.X);
+          top = Math.Min(top, p.pt.Y); bottom = Math.Max(bottom, p.pt.Y);
+          p = p.next;
+        } while (p != ring);
+        grid = new Grid(left, top, right, bottom, n);
+        vertices = new CellLists<Node>(grid.Cells, n);
+        edges = new CellLists<(Node, Node)>(grid.Cells, 4 * n);
+        do
+        {
+          vertices.Add(grid.Cell(p.pt), p);
+          AddEdge(p);
+          p = p.next;
+        } while (p != ring);
+      }
+
+      // registers the edge from p to p.next
+      public void AddEdge(Node p)
+      {
+        grid.SegmentCells(p.pt, p.next.pt, cells);
+        foreach (int cell in cells) edges.Add(cell, (p, p.next));
+      }
+
+      // IsEar for a convex ear
+      public bool IsEar(Node ear)
+      {
+        Point64 a = ear.prev.pt, b = ear.pt, c = ear.next.pt;
+        long minX = Math.Min(a.X, Math.Min(b.X, c.X)), maxX = Math.Max(a.X, Math.Max(b.X, c.X));
+        long minY = Math.Min(a.Y, Math.Min(b.Y, c.Y)), maxY = Math.Max(a.Y, Math.Max(b.Y, c.Y));
+        if (++stamp == int.MaxValue) stamp = 1; // a stale match only repeats a check
+        // what can stop the ear lies in the closed triangle (a vertex in it, an edge crossing
+        // its diagonal), so only the cells it overlaps are visited
+        grid.TriangleCells(a, b, c, cells);
+        foreach (int cell in cells)
+        {
+          // entries of removed vertices and replaced edges are dropped as they're met: they
+          // never come back, as a removed node is never linked in again
+          for (int e = vertices.First(cell), prev = -1; e >= 0; e = vertices.Next(e))
+          {
+            Node p = vertices[e];
+            if (p.removed) { vertices.Unlink(cell, prev, e); continue; }
+            prev = e;
+            if (p == ear || p == ear.prev || p == ear.next) continue;
+            if (BlocksEar(a, b, c, p, minX, maxX, minY, maxY)) return false;
+          }
+          for (int e = edges.First(cell), prev = -1; e >= 0; e = edges.Next(e))
+          {
+            (Node s, Node t) = edges[e];
+            if (s.removed || s.next != t) { edges.Unlink(cell, prev, e); continue; }
+            prev = e;
+            if (s.stamp == stamp) continue;
+            s.stamp = stamp;
+            if (CrossesDiagonal(a, c, s.pt, t.pt, minX, maxX, minY, maxY)) return false;
+          }
+        }
+        return true;
+      }
+    }
+
+    private static void Remove(Node n, EarIndex? index)
     {
       n.prev.next = n.next;
       n.next.prev = n.prev;
+      n.removed = true;
+      index?.AddEdge(n.prev);
     }
 
     // removes vertices that add nothing: repeats, and the middle of three collinear vertices
     // (straight runs and zero-width spikes). Returns a remaining node, or null when fewer than
     // three are left.
-    private static Node? FilterRing(Node start)
+    private static Node? FilterRing(Node start, EarIndex? index)
     {
       Node p = start;
       int guard = 0;
@@ -779,7 +941,7 @@ namespace Clipper2Lib
           if (p.pt == p.next.pt || InternalClipper.CrossProductSign(p.prev.pt, p.pt, p.next.pt) == 0)
           {
             Node prev = p.prev;
-            Remove(p);
+            Remove(p, index);
             p = prev;
             again = true;
             if (++guard > 1 << 30) return null;
@@ -803,34 +965,44 @@ namespace Clipper2Lib
 
     // removes repeats and spikes at n and next to it, as they cascade. Returns a node where
     // n was, or null when fewer than three nodes are left.
-    private static Node? RemoveDegenerate(Node n)
+    private static Node? RemoveDegenerate(Node n, EarIndex? index)
     {
       while (true)
       {
         if (n.next == n || n.next == n.prev) return null;
-        if (n.pt == n.next.pt) { Remove(n.next); continue; }
-        if (IsSpike(n)) { Node p = n.prev; Remove(n); n = p; continue; }
-        if (IsSpike(n.next)) { Remove(n.next); continue; }
+        if (n.pt == n.next.pt) { Remove(n.next, index); continue; }
+        if (IsSpike(n)) { Node p = n.prev; Remove(n, index); n = p; continue; }
+        if (IsSpike(n.next)) { Remove(n.next, index); continue; }
         return n;
       }
     }
 
     private static bool ClipEars(Node ring, List<Point64[]> triangles)
     {
+      int count = 0;
+      Node p0 = ring;
+      do { count++; p0 = p0.next; } while (p0 != ring && count < EarIndexMinNodes);
+      EarIndex? index = null;
+      if (count >= EarIndexMinNodes)
+      {
+        while (p0 != ring) { count++; p0 = p0.next; }
+        index = new EarIndex(ring, count);
+      }
+
       Node ear = ring;
       Node stop = ear;
       bool filtered = false;
       while (ear.prev != ear.next)
       {
-        if (IsEar(ear))
+        if (IsEar(ear, index))
         {
           triangles.Add(new[] { ear.prev.pt, ear.pt, ear.next.pt });
           Node next = ear.next;
-          Remove(ear);
+          Remove(ear, index);
           // the cut can leave repeats or zero-width spikes (where the ring touched itself),
           // which must go before they look like ears
-          Node? n = RemoveDegenerate(next);
-          if (n != null) n = RemoveDegenerate(n.prev);
+          Node? n = RemoveDegenerate(next, index);
+          if (n != null) n = RemoveDegenerate(n.prev, index);
           if (n == null) return true; // nothing with area is left
           ear = n.next;
           stop = ear;
@@ -843,7 +1015,7 @@ namespace Clipper2Lib
 
         // a whole pass without an ear: drop vertices that add nothing and try again
         if (filtered) return false;
-        Node? f = FilterRing(ear);
+        Node? f = FilterRing(ear, index);
         if (f == null) return true; // nothing with area is left
         ear = f;
         stop = ear;
