@@ -6,6 +6,8 @@
     <LangVersion>latest</LangVersion>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)../Clipper2Lib/Clipper2.snk</AssemblyOriginatorKeyFile>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <!-- Clipper2's tests use C++-style naming; keep analyzer noise down. -->
     <NoWarn>$(NoWarn);MSTEST0001;MSTEST0037;MSTEST0032;MSTEST0045;CS8618</NoWarn>

@@ -43,5 +43,49 @@ namespace Clipper2Lib.UnitTests
       } //bottom of num loop
 
     }
+
+    [TestMethod]
+    public void TestMultipleLines()
+    {
+      int testNumber = 1;
+      while (true)
+      {
+        Paths64 subject = new(), subjectOpen = new(), clip = new();
+        Paths64 solution = new(), solutionOpen = new();
+        if (!TestHelpers.LoadTestNum("Lines.txt", testNumber, subject, subjectOpen, clip,
+          out _, out long count, out ClipType ct, out FillRule fr)) break;
+        Clipper64 c = new();
+        c.AddSubject(subject);
+        c.AddOpenSubject(subjectOpen);
+        c.AddClip(clip);
+        Assert.IsTrue(c.Execute(ct, fr, solution, solutionOpen));
+        long count2 = solution.Count + solutionOpen.Count;
+        long countDiff = Math.Abs(count2 - count);
+        double relativeCountDiff = count != 0 ? countDiff / (double) count : 0;
+        if (testNumber == 1)
+        {
+          Assert.AreEqual(1, solution.Count);
+          if (solution.Count > 0)
+          {
+            Assert.AreEqual(6, solution[0].Count);
+            Assert.IsTrue(Clipper.IsPositive(solution[0]));
+          }
+          Assert.AreEqual(1, solutionOpen.Count);
+          if (solutionOpen.Count > 0)
+          {
+            Assert.AreEqual(2, solutionOpen[0].Count);
+            // expect vertex closest to input path's start
+            if (solutionOpen[0].Count > 0) Assert.AreEqual(6, solutionOpen[0][0].Y);
+          }
+        }
+        else
+        {
+          Assert.IsTrue(countDiff <= 8, "count diff in test " + testNumber);
+          Assert.IsTrue(relativeCountDiff <= 0.1, "relative count diff in test " + testNumber);
+        }
+        ++testNumber;
+      }
+      Assert.IsTrue(testNumber >= 17);
+    }
   }
 }
