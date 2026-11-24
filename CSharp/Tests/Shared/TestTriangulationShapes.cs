@@ -291,6 +291,18 @@ namespace Clipper2Lib.UnitTests
     }
 
     [TestMethod]
+    [DataRow(6407)]
+    [DataRow(14230)]
+    [DataRow(27761)]
+    public void TestTriangulateHolesTouchingAtAVertex(int seed)
+    {
+      // fuzz seeds where a hole (split off where a ring passes a point twice) touches the outer
+      // at a vertex that isn't its leftmost: bridged elsewhere, the ring crossed itself at the
+      // touch, and whether ear clipping then failed depended on which copy later holes bridged to
+      CheckBoth(Clipper.ScalePathsD(GridRegion(seed), 1e-3), "grid seed " + seed);
+    }
+
+    [TestMethod]
     public void TestTriangulateRandomPolygons()
     {
       // seeded random star-shaped (so simple) polygons, some far from the origin

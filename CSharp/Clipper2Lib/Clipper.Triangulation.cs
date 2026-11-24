@@ -37,7 +37,110 @@ namespace Clipper2Lib
       public Point64 pt;
       public Node prev = null!;
       public Node next = null!;
+      public bool merged; // while bridging: part of the outer ring (holes bridged in so far)
       public Node(Point64 pt) { this.pt = pt; }
+    }
+
+    // A uniform grid over a bounding box, with about one cell per vertex, for finding what
+    // lies near a point or a segment
+    private sealed class Grid
+    {
+      private readonly long left, top, size;
+      public readonly int cols, rows;
+
+      public Grid(long left, long top, long right, long bottom, int n)
+      {
+        this.left = left;
+        this.top = top;
+        double w = (double) right - left + 1, h = (double) bottom - top + 1;
+        double s = Math.Max(1.0, Math.Ceiling(Math.Sqrt(w * h / Math.Max(n, 1))));
+        // a very thin box would get far more cells than vertices
+        while ((Math.Floor(w / s) + 1) * (Math.Floor(h / s) + 1) > 2.0 * n + 64) s *= 2;
+        size = (long) s;
+        cols = (int) ((right - left) / size) + 1;
+        rows = (int) ((bottom - top) / size) + 1;
+      }
+
+      public int Cells => cols * rows;
+      public long Size => size;
+      public int Col(long x) => (int) Math.Clamp((x - left) / size, 0, cols - 1);
+      public int Row(long y) => (int) Math.Clamp((y - top) / size, 0, rows - 1);
+      public int Cell(Point64 pt) => Row(pt.Y) * cols + Col(pt.X);
+
+      private int RowAt(double y) => (int) Math.Clamp(Math.Floor(y / size), 0, rows - 1);
+      private int ColAt(double x) => (int) Math.Clamp(Math.Floor(x / size), 0, cols - 1);
+
+      // every cell segment a-b passes through, and some next to them: the line is followed
+      // in double, with a cell of slack on each side for its rounding
+      public void SegmentCells(Point64 a, Point64 b, List<int> cells)
+      {
+        cells.Clear();
+        int c0 = Col(Math.Min(a.X, b.X)), c1 = Col(Math.Max(a.X, b.X));
+        int r0 = Row(Math.Min(a.Y, b.Y)), r1 = Row(Math.Max(a.Y, b.Y));
+        if (c1 - c0 <= 1 || r1 - r0 <= 1)
+        {
+          for (int r = r0; r <= r1; r++)
+            for (int c = c0; c <= c1; c++) cells.Add(r * cols + c);
+          return;
+        }
+        // offsets from the grid's corner, so they stay small enough for doubles
+        double ax = a.X - left, ay = a.Y - top, dx = (double) (b.X - a.X), dy = (double) (b.Y - a.Y);
+        if (c1 - c0 >= r1 - r0)
+        {
+          double lo = Math.Min(ax, ax + dx), hi = Math.Max(ax, ax + dx);
+          for (int c = c0; c <= c1; c++)
+          {
+            double x1 = Math.Max(lo, (double) c * size), x2 = Math.Min(hi, (double) (c + 1) * size);
+            double y1 = ay + (x1 - ax) * dy / dx, y2 = ay + (x2 - ax) * dy / dx;
+            int ra = Math.Max(r0, RowAt(Math.Min(y1, y2)) - 1), rb = Math.Min(r1, RowAt(Math.Max(y1, y2)) + 1);
+            for (int r = ra; r <= rb; r++) cells.Add(r * cols + c);
+          }
+        }
+        else
+        {
+          double lo = Math.Min(ay, ay + dy), hi = Math.Max(ay, ay + dy);
+          for (int r = r0; r <= r1; r++)
+          {
+            double y1 = Math.Max(lo, (double) r * size), y2 = Math.Min(hi, (double) (r + 1) * size);
+            double x1 = ax + (y1 - ay) * dx / dy, x2 = ax + (y2 - ay) * dx / dy;
+            int ca = Math.Max(c0, ColAt(Math.Min(x1, x2)) - 1), cb = Math.Min(c1, ColAt(Math.Max(x1, x2)) + 1);
+            for (int c = ca; c <= cb; c++) cells.Add(r * cols + c);
+          }
+        }
+      }
+    }
+
+    // a linked list of items per grid cell
+    private sealed class CellLists<T>
+    {
+      private readonly int[] head;
+      private int[] link;
+      private T[] items;
+      private int count;
+
+      public CellLists(int cells, int capacity)
+      {
+        head = new int[cells];
+        Array.Fill(head, -1);
+        link = new int[Math.Max(capacity, 4)];
+        items = new T[link.Length];
+      }
+
+      public void Add(int cell, T item)
+      {
+        if (count == link.Length)
+        {
+          Array.Resize(ref link, count * 2);
+          Array.Resize(ref items, count * 2);
+        }
+        items[count] = item;
+        link[count] = head[cell];
+        head[cell] = count++;
+      }
+
+      public int First(int cell) => head[cell];
+      public int Next(int entry) => link[entry];
+      public T this[int entry] => items[entry];
     }
 
     internal TriangulateResult Execute(Paths64 paths, out Paths64 sol)
@@ -294,23 +397,24 @@ namespace Clipper2Lib
 
       if (holes.Count > 0)
       {
-        // every ring, for the bridge visibility tests
-        List<Node> allRings = new List<Node> { ring };
+        List<Node> rings = new List<Node> { ring };
         List<Node> holeStarts = new List<Node>(holes.Count);
         foreach (Path64 hole in holes)
         {
           Node? h = MakeRing(hole, false);
           if (h == null) continue;
-          allRings.Add(h);
+          rings.Add(h);
           holeStarts.Add(Leftmost(h));
         }
+        BridgeIndex index = new BridgeIndex(rings);
         // bridge holes from left to right, so a hole's bridge never meets an unbridged hole
         holeStarts.Sort((a, b) => a.pt.X != b.pt.X ? a.pt.X.CompareTo(b.pt.X) : a.pt.Y.CompareTo(b.pt.Y));
         foreach (Node h in holeStarts)
         {
-          Node? bridge = FindBridge(h, ring, allRings);
-          if (bridge == null) return false;
-          SplitRing(bridge, h);
+          if (index.FindBridge(h) is not (Node bridge, Node hv)) return false;
+          index.Merge(hv);
+          (Node a2, Node b2) = SplitRing(bridge, hv);
+          index.AddBridge(bridge, hv, a2, b2);
         }
       }
 
@@ -403,32 +507,186 @@ namespace Clipper2Lib
       return (turn > 0) ? (leftOfOut && leftOfIn) : (leftOfOut || leftOfIn);
     }
 
-    // true when segment a-b crosses an edge of any ring or passes through a vertex
-    // (shared end positions don't count)
-    private static bool SegmentBlocked(Point64 a, Point64 b, List<Node> rings)
+    // The outer ring's vertices and every ring's edges in grids, for bridging holes:
+    // FindBridge gives the nearest vertex of the outer ring (holes bridged in so far) that a
+    // hole vertex can be joined to without crossing anything.
+    private sealed class BridgeIndex
     {
-      long minX = Math.Min(a.X, b.X), maxX = Math.Max(a.X, b.X);
-      long minY = Math.Min(a.Y, b.Y), maxY = Math.Max(a.Y, b.Y);
-      foreach (Node start in rings)
+      private readonly Grid grid;
+      private readonly CellLists<Node> vertices;
+      private readonly CellLists<int> edgeCells;
+      private readonly List<(Point64 c, Point64 d)> edges;
+      private int[] seen;
+      private int stamp;
+      private readonly List<int> cells = new List<int>();
+      private readonly PriorityQueue<Node, (Int128 d, long x, long y)> queue =
+        new PriorityQueue<Node, (Int128, long, long)>();
+
+      // rings[0] is the outer ring, the others are holes
+      public BridgeIndex(List<Node> rings)
       {
-        Node p = start;
+        long left = long.MaxValue, top = long.MaxValue, right = long.MinValue, bottom = long.MinValue;
+        int n = 0;
+        foreach (Node start in rings)
+        {
+          Node p = start;
+          do
+          {
+            left = Math.Min(left, p.pt.X); right = Math.Max(right, p.pt.X);
+            top = Math.Min(top, p.pt.Y); bottom = Math.Max(bottom, p.pt.Y);
+            n++;
+            p = p.next;
+          } while (p != start);
+        }
+        grid = new Grid(left, top, right, bottom, n);
+        vertices = new CellLists<Node>(grid.Cells, n + 2 * rings.Count);
+        edgeCells = new CellLists<int>(grid.Cells, 3 * n);
+        edges = new List<(Point64, Point64)>(n + rings.Count);
+        foreach (Node start in rings)
+        {
+          Node p = start;
+          do
+          {
+            p.merged = start == rings[0];
+            vertices.Add(grid.Cell(p.pt), p);
+            AddEdge(p.pt, p.next.pt);
+            p = p.next;
+          } while (p != start);
+        }
+        seen = new int[edges.Count + rings.Count];
+      }
+
+      private void AddEdge(Point64 c, Point64 d)
+      {
+        int id = edges.Count;
+        edges.Add((c, d));
+        grid.SegmentCells(c, d, cells);
+        foreach (int cell in cells) edgeCells.Add(cell, id);
+      }
+
+      // hole h becomes part of the outer ring
+      public void Merge(Node h)
+      {
+        Node p = h;
         do
         {
-          Point64 c = p.pt, d = p.next.pt;
+          p.merged = true;
           p = p.next;
-          if (Math.Max(c.X, d.X) < minX || Math.Min(c.X, d.X) > maxX ||
-              Math.Max(c.Y, d.Y) < minY || Math.Min(c.Y, d.Y) > maxY) continue;
-          if (c != a && c != b && IsOnSegment(c, a, b)) return true;
-          if (c == a || c == b || d == a || d == b) continue;
-          int s1 = InternalClipper.CrossProductSign(a, b, c);
-          int s2 = InternalClipper.CrossProductSign(a, b, d);
-          if (s1 * s2 >= 0) continue;
-          int s3 = InternalClipper.CrossProductSign(c, d, a);
-          int s4 = InternalClipper.CrossProductSign(c, d, b);
-          if (s3 * s4 < 0) return true;
-        } while (p != start);
+        } while (p != h);
       }
-      return false;
+
+      // after SplitRing(a, b): the copies a2 and b2 are new outer ring vertices, and the bridge
+      // a-b is a new edge (the ring's other edges keep their positions)
+      public void AddBridge(Node a, Node b, Node a2, Node b2)
+      {
+        a2.merged = b2.merged = true;
+        vertices.Add(grid.Cell(a2.pt), a2);
+        vertices.Add(grid.Cell(b2.pt), b2);
+        if (a.pt != b.pt) AddEdge(a.pt, b.pt);
+      }
+
+      // Returns the outer ring vertex to join and the hole vertex to join it to, which is h
+      // unless the hole touches the outer ring at another vertex.
+      public (Node bridge, Node hole)? FindBridge(Node h)
+      {
+        // the hole touches the outer ring at a vertex, both of its edges there inside the
+        // outer's corner: join it there, by a zero length bridge. The ring then passes that
+        // point as the region does; joined anywhere else it would cross itself there.
+        Node q = h;
+        do
+        {
+          for (int e = vertices.First(grid.Cell(q.pt)); e >= 0; e = vertices.Next(e))
+          {
+            Node p = vertices[e];
+            if (p.merged && p.pt == q.pt && LocallyInside(p, q.next.pt) && LocallyInside(p, q.prev.pt)) return (p, q);
+          }
+          q = q.next;
+        } while (q != h);
+
+        // the hole touches the outer here: a zero length bridge
+        int cell = grid.Cell(h.pt);
+        for (int e = vertices.First(cell); e >= 0; e = vertices.Next(e))
+        {
+          Node p = vertices[e];
+          if (p.merged && p.pt == h.pt && (LocallyInside(p, h.next.pt) || LocallyInside(p, h.prev.pt))) return (p, h);
+        }
+
+        // the outer ring's vertices from nearest to furthest: after the cells within r of h's
+        // cell, every vertex not yet queued is further than r cells away
+        queue.Clear();
+        int hc = grid.Col(h.pt.X), hr = grid.Row(h.pt.Y);
+        int maxR = Math.Max(Math.Max(hc, grid.cols - 1 - hc), Math.Max(hr, grid.rows - 1 - hr));
+        for (int r = 0; r <= maxR; r++)
+        {
+          // the square ring of cells at distance r: its top and bottom rows, then its sides
+          int c0 = Math.Max(hc - r, 0), c1 = Math.Min(hc + r, grid.cols - 1);
+          if (hr - r >= 0)
+            for (int col = c0; col <= c1; col++) QueueCell(h, (hr - r) * grid.cols + col);
+          if (r > 0 && hr + r < grid.rows)
+            for (int col = c0; col <= c1; col++) QueueCell(h, (hr + r) * grid.cols + col);
+          if (r > 0)
+            for (int row = Math.Max(hr - r + 1, 0); row <= Math.Min(hr + r - 1, grid.rows - 1); row++)
+            {
+              if (hc - r >= 0) QueueCell(h, row * grid.cols + hc - r);
+              if (hc + r < grid.cols) QueueCell(h, row * grid.cols + hc + r);
+            }
+          Int128 reach = (Int128) r * grid.Size;
+          Int128 bound = r == maxR ? Int128.MaxValue : reach * reach;
+          while (queue.TryPeek(out Node? n, out (Int128 d, long, long) key) && key.d <= bound)
+          {
+            queue.Dequeue();
+            if (!LocallyInside(n, h.pt) || !LocallyInside(h, n.pt)) continue;
+            if (SegmentBlocked(h.pt, n.pt)) continue;
+            return (n, h);
+          }
+        }
+        return null;
+      }
+
+      private void QueueCell(Node h, int cell)
+      {
+        for (int e = vertices.First(cell); e >= 0; e = vertices.Next(e))
+        {
+          Node p = vertices[e];
+          if (!p.merged || p.pt == h.pt) continue;
+          Int128 dx = p.pt.X - h.pt.X, dy = p.pt.Y - h.pt.Y;
+          queue.Enqueue(p, (dx * dx + dy * dy, p.pt.X, p.pt.Y));
+        }
+      }
+
+      // true when segment a-b crosses an edge of any ring or passes through a vertex
+      // (shared end positions don't count)
+      private bool SegmentBlocked(Point64 a, Point64 b)
+      {
+        long minX = Math.Min(a.X, b.X), maxX = Math.Max(a.X, b.X);
+        long minY = Math.Min(a.Y, b.Y), maxY = Math.Max(a.Y, b.Y);
+        if (seen.Length < edges.Count) Array.Resize(ref seen, edges.Count * 2);
+        if (++stamp == int.MaxValue)
+        {
+          Array.Clear(seen);
+          stamp = 1;
+        }
+        grid.SegmentCells(a, b, cells);
+        foreach (int cell in cells)
+          for (int e = edgeCells.First(cell); e >= 0; e = edgeCells.Next(e))
+          {
+            int id = edgeCells[e];
+            if (seen[id] == stamp) continue;
+            seen[id] = stamp;
+            (Point64 c, Point64 d) = edges[id];
+            if (Math.Max(c.X, d.X) < minX || Math.Min(c.X, d.X) > maxX ||
+                Math.Max(c.Y, d.Y) < minY || Math.Min(c.Y, d.Y) > maxY) continue;
+            if (c != a && c != b && IsOnSegment(c, a, b)) return true;
+            if (c == a || c == b || d == a || d == b) continue;
+            int s1 = InternalClipper.CrossProductSign(a, b, c);
+            int s2 = InternalClipper.CrossProductSign(a, b, d);
+            if (s1 * s2 >= 0) continue;
+            int s3 = InternalClipper.CrossProductSign(c, d, a);
+            int s4 = InternalClipper.CrossProductSign(c, d, b);
+            if (s3 * s4 < 0) return true;
+          }
+        return false;
+      }
     }
 
     private static bool IsOnSegment(Point64 pt, Point64 a, Point64 b)
@@ -438,39 +696,9 @@ namespace Clipper2Lib
         pt.Y >= Math.Min(a.Y, b.Y) && pt.Y <= Math.Max(a.Y, b.Y);
     }
 
-    // the nearest vertex of the outer ring (holes already bridged in) that hole vertex h
-    // can be joined to without crossing anything
-    private static Node? FindBridge(Node h, Node ring, List<Node> allRings)
-    {
-      List<(Int128 d, Node n)> candidates = new List<(Int128, Node)>();
-      Node p = ring;
-      do
-      {
-        if (p.pt == h.pt)
-        {
-          // the hole touches the outer here: a zero length bridge
-          if (LocallyInside(p, h.next.pt) || LocallyInside(p, h.prev.pt)) return p;
-        }
-        else
-        {
-          Int128 dx = p.pt.X - h.pt.X, dy = p.pt.Y - h.pt.Y;
-          candidates.Add((dx * dx + dy * dy, p));
-        }
-        p = p.next;
-      } while (p != ring);
-
-      candidates.Sort((x, y) => x.d.CompareTo(y.d));
-      foreach ((Int128 _, Node n) in candidates)
-      {
-        if (!LocallyInside(n, h.pt) || !LocallyInside(h, n.pt)) continue;
-        if (SegmentBlocked(h.pt, n.pt, allRings)) continue;
-        return n;
-      }
-      return null;
-    }
-
-    // joins ring node a to node b of another ring by a two-way bridge (copies of a and b)
-    private static void SplitRing(Node a, Node b)
+    // joins ring node a to node b of another ring by a two-way bridge, and returns the copies
+    // of a and b it makes
+    private static (Node a2, Node b2) SplitRing(Node a, Node b)
     {
       Node a2 = new Node(a.pt), b2 = new Node(b.pt);
       Node an = a.next, bp = b.prev;
@@ -478,6 +706,7 @@ namespace Clipper2Lib
       a2.next = an; an.prev = a2;
       b2.next = a2; a2.prev = b2;
       bp.next = b2; b2.prev = bp;
+      return (a2, b2);
     }
 
     // true when the triangle (a, b, c) at node ear can be clipped: it is convex, no other
