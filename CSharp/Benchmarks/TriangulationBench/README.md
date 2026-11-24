@@ -53,3 +53,22 @@ Profiles (dotnet-trace, sampled): perforated spends 77% in hole bridging (`FindB
 ## Verify
 
 `verify [filter]` runs every case through the `Paths64` overload in both modes and checks the result exactly, as the fuzz harness does: success, positive triangles, exact coverage (the triangles' edges minus the region's cancel as chains), and with Delaunay, every shared edge locally Delaunay (BigInteger in-circle). It exits with 1 if any case fails. The fuzz inputs are small, so this is the check for large rings.
+
+## Results at 2.1.0-walrus.2
+
+`quick`, median ms with Delaunay, the walrus.1 code (`4f89ab8`) and the walrus.2 code (`dbc1c4b`) interleaved in one session while Visual Studio was installing (absolute numbers inflated by about 30%, ratios reliable):
+
+| Case | walrus.1 | walrus.2 | |
+|------|---------:|---------:|-:|
+| nodeflow-perforated | 104.8 | 5.6 | x18.8 |
+| nodeflow-slice-Plate | 11.4 | 4.6 | x2.5 |
+| nodeflow-slice-base-tube-plate-001 | 2.1 | 1.3 | x1.6 |
+| nodeflow-disc-ellipses | 2.0 | 1.4 | x1.4 |
+| nodeflow-saved-Cad-tube-plate-001-0 | 0.67 | 0.50 | x1.3 |
+| nodeflow-plate | 0.44 | 0.33 | x1.3 |
+| nodeflow-n972 | 0.066 | 0.054 | x1.2 |
+| nodeflow-saved-Cad-test-002-1 | 0.03..0.05 | 0.056 | slower by ~20 us |
+
+Synthetic, from the step commits: plate-500-holes 9016 -> ~140, plate-100-holes 151 -> ~17, dense-circle 66 -> ~8, big-circle-bigint 37 -> ~5, star-10k 248 -> ~140 (30% of it the up-front Union). comb-10k stays at 200..370 ms with ~215 MB allocated: its base is a strip with collinear top vertices, so any triangulation is a fan of long diagonals, each registered in hundreds of index cells.
+
+Steps: `858a3f7` bridging grid and touching holes, `f13a15b` ear index, `7eda2f5` half-edge Legalize, `a21a0ee` SplitPinches prefix sums, `145e38b` clip order, `63e16aa` in-circle filter. Each commit message has its own before/after numbers.

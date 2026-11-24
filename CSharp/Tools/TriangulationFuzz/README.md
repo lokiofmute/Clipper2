@@ -36,3 +36,7 @@ Baseline on 2026-11-24 (commit `ae9133d`, before the exact coverage check; the s
 Wider runs with the exact coverage check, at commit `4f89ab8` (before the optimization work): `star 0 100000` and `region 0 50000` 0 bad; `grid 0 200000` 18 bad, all `fail` (9 seeds).
 
 An honest `fail` can come from the input: the up-front Union rounds intersections to integers, which can leave a ring crossing itself by less than a unit (grid 70327: an edge passes 0.4 units beside a vertex and cuts the next edge). No exact triangulation exists then.
+
+At `2.1.0-walrus.2` (commit `dbc1c4b`): `star 0 100000` and `region 0 50000` 0 bad; `grid 0 200000` 4 bad, all `fail` (seeds 70327 and 182727, both modes; see above). Grid 6407, 14230 and 27761 are tests now.
+
+A `TRI_CHECK` build (`dotnet build -c Release -p:DefineConstants=TRI_CHECK -o <dir>`) uses the ear index for every ring of 4 vertices and more, and throws if an answer differs from the whole-ring scan. Run the fuzz families with it after changing the index.
