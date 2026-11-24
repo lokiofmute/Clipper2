@@ -568,6 +568,19 @@ namespace Clipper2Lib
       return result;
     }
 
+#if USINGZ
+    // A point at rounded (x, y) that keeps z exactly. new Point64(double, double, long)
+    // would bind to the all-double constructor and round z through a double, which loses
+    // Z values above 2^53.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static Point64 MakePoint(double x, double y, long z)
+    {
+      Point64 result = new Point64(x, y);
+      result.Z = z;
+      return result;
+    }
+#endif
+
     // Rounds like std::nearbyint in round-to-nearest mode (ties to even), for val within
     // the long range. .NET has no other rounding mode, so this matches the C++ default.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -644,17 +657,14 @@ namespace Clipper2Lib
     // seg2, even when 'ip' hasn't been constrained (ie 'ip' is inside seg1).
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool GetLineIntersectPt(Point64 seg1a,
-      Point64 seg1b, Point64 seg2a, Point64 seg2b, out Point64 ip)
+    public static bool GetLineIntersectPt(Point64 ln1a,
+      Point64 ln1b, Point64 ln2a, Point64 ln2b, out Point64 ip)
     {
       // integer segments are evaluated from their bottom end, as the sweep does, so that
       // a shared edge rounds to the same point whichever way round it is given
-      bool rev1 = seg1b.Y > seg1a.Y || (seg1b.Y == seg1a.Y && seg1b.X < seg1a.X);
-      bool rev2 = seg2b.Y > seg2a.Y || (seg2b.Y == seg2a.Y && seg2b.X < seg2a.X);
-      Point64 ln1a = rev1 ? seg1b : seg1a;
-      Point64 ln1b = rev1 ? seg1a : seg1b;
-      Point64 ln2a = rev2 ? seg2b : seg2a;
-      Point64 ln2b = rev2 ? seg2a : seg2b;
+      // (the parameter names are those of the 2.0.0 API)
+      if (ln1b.Y > ln1a.Y || (ln1b.Y == ln1a.Y && ln1b.X < ln1a.X)) (ln1a, ln1b) = (ln1b, ln1a);
+      if (ln2b.Y > ln2a.Y || (ln2b.Y == ln2a.Y && ln2b.X < ln2a.X)) (ln2a, ln2b) = (ln2b, ln2a);
 
       double dy1 = (ln1b.Y - ln1a.Y);
       double dx1 = (ln1b.X - ln1a.X);

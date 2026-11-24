@@ -543,7 +543,7 @@ namespace Clipper2Lib
     private Point64 GetPerpendic(Point64 pt, PointD norm)
     {
 #if USINGZ
-      return new Point64(pt.X + norm.x * _groupDelta,
+      return InternalClipper.MakePoint(pt.X + norm.x * _groupDelta,
         pt.Y + norm.y * _groupDelta, pt.Z);
 #else
       return new Point64(pt.X + norm.x * _groupDelta,
@@ -571,10 +571,10 @@ namespace Clipper2Lib
       {
         double absDelta = Math.Abs(_groupDelta);
 #if USINGZ
-        pt1 = new Point64(
+        pt1 = InternalClipper.MakePoint(
           path[j].X - absDelta * _normals[j].x, 
           path[j].Y - absDelta * _normals[j].y, path[j].Z);
-        pt2 = new Point64(
+        pt2 = InternalClipper.MakePoint(
           path[j].X + absDelta * _normals[j].x, 
           path[j].Y + absDelta * _normals[j].y, path[j].Z);
 #else
@@ -589,10 +589,10 @@ namespace Clipper2Lib
       else
       {
 #if USINGZ
-        pt1 = new Point64(
+        pt1 = InternalClipper.MakePoint(
           path[j].X + _groupDelta * _normals[k].x,
           path[j].Y + _groupDelta * _normals[k].y, path[j].Z);
-        pt2 = new Point64(
+        pt2 = InternalClipper.MakePoint(
           path[j].X + _groupDelta * _normals[j].x,
           path[j].Y + _groupDelta * _normals[j].y, path[j].Z);
 #else
@@ -665,7 +665,7 @@ namespace Clipper2Lib
     {
       double q = _groupDelta / (cosA + 1);
 #if USINGZ
-      pathOut.Add(new Point64(
+      pathOut.Add(InternalClipper.MakePoint(
           path[j].X + (_normals[k].x + _normals[j].x) * q,
           path[j].Y + (_normals[k].y + _normals[j].y) * q,
           path[j].Z));
@@ -704,7 +704,7 @@ namespace Clipper2Lib
       PointD offsetVec = new PointD(_normals[k].x * _groupDelta, _normals[k].y * _groupDelta);
       if (j == k) offsetVec.Negate();
 #if USINGZ
-      pathOut.Add(new Point64(pt.X + offsetVec.x, pt.Y + offsetVec.y, pt.Z));
+      pathOut.Add(InternalClipper.MakePoint(pt.X + offsetVec.x, pt.Y + offsetVec.y, pt.Z));
 #else
       pathOut.Add(new Point64(pt.X + offsetVec.x, pt.Y + offsetVec.y));
 #endif
@@ -714,7 +714,7 @@ namespace Clipper2Lib
         offsetVec = new PointD(offsetVec.x * _stepCos - _stepSin * offsetVec.y,
             offsetVec.x * _stepSin + offsetVec.y * _stepCos);
 #if USINGZ
-        pathOut.Add(new Point64(pt.X + offsetVec.x, pt.Y + offsetVec.y, pt.Z));
+        pathOut.Add(InternalClipper.MakePoint(pt.X + offsetVec.x, pt.Y + offsetVec.y, pt.Z));
 #else
         pathOut.Add(new Point64(pt.X + offsetVec.x, pt.Y + offsetVec.y));
 #endif

@@ -384,7 +384,7 @@ namespace Clipper2Lib
       Path64 result = new Path64(path.Count);
 #if USINGZ
       foreach (Point64 pt in path)
-        result.Add(new Point64(pt.X * scale, pt.Y * scale, pt.Z));
+        result.Add(InternalClipper.MakePoint(pt.X * scale, pt.Y * scale, pt.Z));
 #else
       foreach (Point64 pt in path)
         result.Add(new Point64(pt.X * scale, pt.Y * scale));
