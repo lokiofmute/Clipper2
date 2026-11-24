@@ -362,6 +362,9 @@ namespace Clipper2Lib
     private readonly HorzJoinPoolList _horzJoinList;
     private readonly OutPtPoolList _outPtPool;
     private int _currentLocMin;
+    // Every active edge's curX is already TopX(topY). Set by DoIntersections
+    // and only valid for the DoTopOfScanbeam call that immediately follows it.
+    private bool _currXAtTop;
     private long _currentBotY;
     private bool _isSortedMinimaList;
     private bool _hasOpenPaths;
@@ -785,10 +788,8 @@ namespace Clipper2Lib
         _isSortedMinimaList = true;
       }
 
-      _scanlineList.EnsureCapacity(_minimaList.Count);
-      for (int i = _minimaList.Count - 1; i >= 0; i--)
-        _scanlineList.Add(_minimaList[i].vertex.pt.Y);
-
+      // the local minima aren't added to _scanlineList since they're already
+      // sorted, instead PopScanline() merges them with _scanlineList
       _currentBotY = 0;
       _currentLocMin = 0;
       _actives = null;
@@ -806,26 +807,43 @@ namespace Clipper2Lib
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool PeekLocMinY(out long y)
+    {
+      if (_currentLocMin >= _minimaList.Count)
+      {
+        y = 0;
+        return false;
+      }
+      y = _minimaList[_currentLocMin].vertex.pt.Y;
+      return true;
+    }
+
+    // A y that comes from a local minima isn't consumed here. It stays pending
+    // until PopLocalMinima, so InsertLocalMinimaIntoAEL must run before the next pop.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool PopScanline(out long y)
     {
+      // the next scanline is the larger of the next local minima's y (local
+      // minima are sorted by descending y) and the top of _scanlineList
+      bool hasLocMin = PeekLocMinY(out long locMinY);
       int cnt = _scanlineList.Count - 1;
-      if (cnt < 0)
+      if (!hasLocMin && cnt < 0)
       {
         y = 0;
         return false;
       }
 
-      y = _scanlineList[cnt];
-      _scanlineList.RemoveAt(cnt--);
+      y = hasLocMin ? locMinY : _scanlineList[cnt];
+      if (cnt >= 0 && _scanlineList[cnt] > y) y = _scanlineList[cnt];
       while (cnt >= 0 && y == _scanlineList[cnt])
-        _scanlineList.RemoveAt(cnt--);
+        _scanlineList.RemoveAt(cnt--); // pop duplicates
       return true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool HasLocMinAtY(long y)
     {
-      return (_currentLocMin < _minimaList.Count && _minimaList[_currentLocMin].vertex.pt.Y == y);
+      return PeekLocMinY(out long locMinY) && locMinY == y;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1852,10 +1870,13 @@ namespace Clipper2Lib
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void AdjustCurrXAndCopyToSEL(long topY)
+    // returns true when the edges are still sorted by curX (ie no intersections)
+    private bool AdjustCurrXAndCopyToSEL(long topY)
     {
       Active? ae = _actives;
       _sel = ae;
+      bool sorted = true;
+      long prevX = long.MinValue;
       while (ae != null)
       {
         ae.prevInSEL = ae.prevInAEL;
@@ -1863,10 +1884,14 @@ namespace Clipper2Lib
         ae.jump = ae.nextInSEL;
         // it is safe to ignore 'joined' edges here because
         // if necessary they will be split in IntersectEdges()
-        ae.curX = TopX(ae, topY);
+        long x = TopX(ae, topY);
+        ae.curX = x;
+        if (x < prevX) sorted = false;
+        prevX = x;
         // NB don't update ae.curr.Y yet (see AddNewIntersectNode)
         ae = ae.nextInAEL;
       }
+      return sorted;
     }
 
     protected void ExecuteInternal(ClipType ct, FillRule fillRule)
@@ -1899,6 +1924,7 @@ namespace Clipper2Lib
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void DoIntersections(long topY)
     {
+      _currXAtTop = false;
       if (!BuildIntersectList(topY)) return;
       ProcessIntersectList();
       DisposeIntersectNodes();
@@ -1980,7 +2006,13 @@ namespace Clipper2Lib
 
       // Calculate edge positions at the top of the current scanbeam, and from this
       // we will determine the intersections required to reach these new positions.
-      AdjustCurrXAndCopyToSEL(topY);
+      // If the edges are still in order there are no intersections, so the merge
+      // sort (which always does log2(n) passes over the edges) can be skipped.
+      if (AdjustCurrXAndCopyToSEL(topY))
+      {
+        _currXAtTop = true;
+        return false;
+      }
 
       // Find all edge intersections in the current scanbeam using a stable merge
       // sort that ensures only adjacent edges are intersecting. Intersect info is
@@ -2327,7 +2359,7 @@ private void DoHorizontal(Active horz)
           if (IsHorizontal(ae))
             PushHorz(ae); // horizontals are processed later
         }
-        else // i.e. not the top of the edge
+        else if (!_currXAtTop) // i.e. not the top of the edge
           ae.curX = TopX(ae, y);
 
         ae = ae.nextInAEL;
@@ -3069,8 +3101,12 @@ private void DoHorizontal(Active horz)
       for (int i = 0; i < splits!.Count; i++)
       {
         OutRec? split = _outrecList[splits[i]];
-        if (split.pts == null && split.splits != null &&
-          CheckSplitOwner(outrec, split.splits)) return true; //#942
+        if (split.pts == null && split.splits != null)
+        {
+          if (split.recursiveSplit == outrec) continue;
+          split.recursiveSplit = outrec; // emptied OutRecs can reference each other
+          if (CheckSplitOwner(outrec, split.splits)) return true; //#942
+        }
         split = GetRealOutRec(split);
         if (split == null || split == outrec || split.recursiveSplit == outrec) continue;
         split.recursiveSplit = outrec; //#599
