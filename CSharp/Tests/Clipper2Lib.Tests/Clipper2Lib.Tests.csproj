@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\Clipper2Lib\Clipper2Lib.csproj" />
+  </ItemGroup>
+</Project>

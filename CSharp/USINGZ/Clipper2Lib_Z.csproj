@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <DefineConstants>$(DefineConstants);USINGZ</DefineConstants>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\Clipper2Lib\Clipper2.snk</AssemblyOriginatorKeyFile>
+    <DelaySign>false</DelaySign>
+    <IsPublishable>false</IsPublishable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Clipper2Lib\*.cs" LinkBase="Clipper2Lib" />
+  </ItemGroup>
+
+</Project>

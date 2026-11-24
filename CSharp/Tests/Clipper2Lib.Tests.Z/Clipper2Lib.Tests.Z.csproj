@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);USINGZ</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Shared\Z\*.cs" LinkBase="Shared\Z" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\USINGZ\Clipper2Lib_Z.csproj" />
+  </ItemGroup>
+</Project>

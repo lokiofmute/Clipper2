@@ -1,0 +1,20 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- Clipper2's tests use C++-style naming; keep analyzer noise down. -->
+    <NoWarn>$(NoWarn);MSTEST0001;MSTEST0037;MSTEST0032;MSTEST0045;CS8618</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MSTest" Version="3.11.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)Shared\*.cs" LinkBase="Shared" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\Utils\ClipFileIO\Clipper.FileIO.cs" Link="Shared\Clipper.FileIO.cs" />
+  </ItemGroup>
+</Project>
