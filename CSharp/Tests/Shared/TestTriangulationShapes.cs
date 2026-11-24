@@ -244,6 +244,53 @@ namespace Clipper2Lib.UnitTests
     }
 
     [TestMethod]
+    public void TestTriangulateCollinearAndTouching()
+    {
+      // from the branch review: the old sweep linked through collinear vertices, and gave
+      // overlapping triangles where a ring touches its own edge
+      CheckBoth(new PathsD { Poly(14, 4, 12, 7, 11.286, 5.929, 10, 7, 8, 5.333, 8, 7, 6, 7, 6, 5,
+        5, 4, 6, 3, 7, 4, 7.6, 4, 10, 2, 10.857, 2.714, 12, 1) }, "collinear link");
+      CheckBoth(new PathsD { Poly(11, 10, 10, 11, 11, 12, 11, 13, 8, 13, 8, 12, 10, 12, 10, 6, 11, 6) }, "touching ring");
+      // a diamond hole touching its rectangle at three points, splitting it into three pieces
+      CheckBoth(new PathsD { Rect(19, 18, 22, 24, false), Poly(19, 19, 20.5, 20, 22, 19, 20.5, 18) }, "three touches");
+      // a figure-8 ring: two triangles sharing one vertex
+      CheckBoth(new PathsD { Poly(12.714, 5.286, 11, 7, 12.714, 8.714, 12.5, 9, 11, 7, 12.5, 5) }, "figure 8");
+    }
+
+    // CAD-like regions: unions, differences and xors of grid-aligned rectangles and diamonds,
+    // full of collinear runs, T-touches and pinches
+    private static Paths64 GridRegion(int seed)
+    {
+      Random rng = new(seed);
+      Paths64 subj = new(), clip = new();
+      int k = rng.Next(2, 12);
+      for (int s = 0; s < k; s++)
+      {
+        long x = rng.Next(0, 20) * 1000, y = rng.Next(0, 20) * 1000;
+        long w = rng.Next(1, 8) * 1000, h = rng.Next(1, 8) * 1000;
+        Path64 p = rng.Next(3) == 0
+          ? Clipper.MakePath(new long[] { x + w / 2, y, x + w, y + h / 2, x + w / 2, y + h, x, y + h / 2 })
+          : Clipper.MakePath(new long[] { x, y, x + w, y, x + w, y + h, x, y + h });
+        if (rng.Next(2) == 0) p.Reverse();
+        (rng.Next(3) == 0 ? clip : subj).Add(p);
+      }
+      ClipType ct = (ClipType) rng.Next(1, 5);
+      if (ct == ClipType.Intersection) ct = ClipType.Union;
+      return Clipper.BooleanOp(ct, subj, clip, FillRule.NonZero);
+    }
+
+    [TestMethod]
+    public void TestTriangulateGridRegions()
+    {
+      for (int seed = 0; seed < 1500; seed++)
+      {
+        Paths64 region = GridRegion(seed);
+        if (region.Count == 0) continue;
+        CheckBoth(Clipper.ScalePathsD(region, 1e-3), "grid seed " + seed);
+      }
+    }
+
+    [TestMethod]
     public void TestTriangulateRandomPolygons()
     {
       // seeded random star-shaped (so simple) polygons, some far from the origin

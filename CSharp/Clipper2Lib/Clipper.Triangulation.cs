@@ -1,13 +1,19 @@
 /*******************************************************************************
-* Author    :  Angus Johnson                                                   *
-* Date      :  13 December 2025                                                *
-* Release   :  BETA RELEASE                                                    *
-* Website   :  https://www.angusj.com                                          *
-* Copyright :  Angus Johnson 2010-2025                                         *
-* Purpose   :  Constrained Delaunay Triangulation                              *
+* Purpose   :  Constrained (Delaunay) triangulation of polygons with holes     *
 * License   :  https://www.boost.org/LICENSE_1_0.txt                           *
+*                                                                              *
+* This replaces the sweep-line triangulation that upstream Clipper2 2.0.0      *
+* shipped (and the C++ removed in 1d16960). That sweep returned success with   *
+* overlapping triangles on many simple polygons with collinear vertices, and   *
+* with Delaunay on it could flip edges forever (NodeFlow N972). This version:  *
+*  1. normalizes the input with a Union into a PolyTree (outers and holes),    *
+*  2. ear clips each outer with its holes bridged in, using exact predicates,  *
+*  3. checks exactly that the triangles' areas add up to the region's area,    *
+*  4. with useDelaunay, flips edges (Lawson) using the exact in-circle test,   *
+*     which always terminates.                                                 *
 *******************************************************************************/
 
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -16,1073 +22,682 @@ namespace Clipper2Lib
 {
   public enum TriangulateResult { success, fail, noPolygons, pathsIntersect }
 
-  // -------------------------------------------------------------------------
-  // Internal triangulation helpers
-  // -------------------------------------------------------------------------
-
-  internal enum EdgeKind { loose, ascend, descend } // ascend & descend are 'fixed' edges
-  internal enum IntersectKind { none, collinear, intersect }
-  internal enum EdgeContainsResult { neither, left, right }
-
-  internal class Vertex2
-  {
-    public Point64 pt;
-    public List<Edge> edges = new List<Edge>();
-    public bool innerLM = false;
-
-    public Vertex2(Point64 p64)
-    {
-      pt = p64;
-      edges. Capacity = 2;
-    }
-  }
-
-  internal class Edge
-  {
-      public Vertex2 vL = null!;
-      public Vertex2 vR = null!;
-      public Vertex2 vB = null!;
-      public Vertex2 vT = null!;
-      public EdgeKind kind = EdgeKind.loose;
-      public Triangle? triA = null;
-      public Triangle? triB = null;
-      public bool isActive = false;
-      public Edge? nextE = null;
-      public Edge? prevE = null;
-  }
-
-  internal class Triangle
-  {
-    public Edge[] edges = new Edge[3];
-
-    public Triangle(Edge e1, Edge e2, Edge e3)
-    {
-      edges[0] = e1;
-      edges[1] = e2;
-      edges[2] = e3;
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Delaunay class declaration & implementation
-  // -------------------------------------------------------------------------
-
   internal class Delaunay
   {
-    private readonly List<Vertex2> allVertices = new List<Vertex2>();
-    private readonly List<Edge> allEdges = new List<Edge>();
-    private readonly List<Triangle> allTriangles = new List<Triangle>();
-    private readonly Stack<Edge> pendingDelaunayStack = new Stack<Edge>();
-    private readonly Stack<Edge> horzEdgeStack = new Stack<Edge>();
-    private readonly Stack<Vertex2> locMinStack = new Stack<Vertex2>();
     private readonly bool useDelaunay;
-    private Edge? firstActive = null;
-    private Vertex2? lowermostVertex = null;
 
     public Delaunay(bool delaunay = true)
     {
       useDelaunay = delaunay;
     }
 
-    private void AddPath(Path64 path)
+    // A vertex in an ear clipping ring
+    private sealed class Node
     {
-      int len = path.Count;
-      if (len == 0) return;
-
-      int i0 = 0, iPrev, iNext;
-
-      if (!FindLocMinIdx(path, len, ref i0)) return;
-
-      iPrev = Prev(i0, len);
-      while (path[iPrev].Equals(path[i0]))
-        iPrev = Prev(iPrev, len);
-
-      iNext = Next(i0, len);
-
-      int i = i0;
-      while (InternalClipper.CrossProductSign(path[iPrev], path[i], path[iNext]) == 0)
-      {
-        FindLocMinIdx(path, len, ref i);
-        if (i == i0) return; // entirely collinear path
-        iPrev = (int) Prev(i, len);
-        while (path[iPrev].Equals(path[i]))
-          iPrev = Prev(iPrev, len);
-        iNext = Next(i, len);
-      }
-
-      int vert_cnt = allVertices.Count;
-      Vertex2 v0 = new Vertex2(path[i]);
-      allVertices.Add(v0);
-
-      if (LeftTurning(path[iPrev], path[i], path[iNext]))
-        v0.innerLM = true;
-
-      Vertex2 vPrev = v0;
-      i = iNext;
-
-      for (; ; )
-      {
-        // vPrev is a locMin here
-        locMinStack.Push(vPrev);
-        // ? update lowermostVertex ...
-        if (lowermostVertex == null ||
-          vPrev.pt.Y > lowermostVertex.pt.Y ||
-          (vPrev.pt.Y == lowermostVertex.pt.Y &&
-          vPrev.pt.X < lowermostVertex.pt.X))
-            lowermostVertex = vPrev;
-
-        iNext = Next(i, len);
-        if (InternalClipper.CrossProductSign(vPrev.pt, path[i], path[iNext]) == 0)
-        {
-          i = iNext;
-          continue;
-        }
-
-        // ascend up next bound to LocMax
-        while (path[i].Y <= vPrev.pt.Y)
-        {
-          Vertex2 v = new Vertex2(path[i]);
-          allVertices.Add(v);
-          CreateEdge(vPrev, v, EdgeKind.ascend);
-          vPrev = v;
-          i = iNext;
-          iNext = Next(i, len);
-
-          while (InternalClipper.CrossProductSign(vPrev.pt, path[i], path[iNext]) == 0)
-          {
-            i = iNext;
-            iNext = Next(i, len);
-          }
-        }
-
-        // Now at a locMax, so descend to next locMin
-        Vertex2 vPrevPrev = vPrev;
-        while (i != i0 && path[i].Y >= vPrev.pt.Y)
-        {
-          Vertex2 v = new Vertex2(path[i]);
-          allVertices.Add(v);
-          CreateEdge(v, vPrev, EdgeKind.descend);
-          vPrevPrev = vPrev;
-          vPrev = v;
-          i = iNext;
-          iNext = Next(i, len);
-
-          while (InternalClipper.CrossProductSign(vPrev.pt, path[i], path[iNext]) == 0)
-          {
-            i = iNext;
-            iNext = Next(i, len);
-          }
-        }
-
-        // now at the next locMin
-        if (i == i0) break;
-        if (LeftTurning(vPrevPrev.pt, vPrev.pt, path[i]))
-          vPrev.innerLM = true;
-      }
-
-      CreateEdge(v0, vPrev, EdgeKind.descend);
-
-      // finally, ignore this path if is not a polygon or too small
-      len = allVertices.Count - vert_cnt;
-      int idx = vert_cnt;
-      if (len < 3 || (len == 3 &&
-          ((DistSqr(allVertices[idx].pt, allVertices[idx + 1].pt) <= 1) ||
-           (DistSqr(allVertices[idx + 1].pt, allVertices[idx + 2].pt) <= 1) ||
-           (DistSqr(allVertices[idx + 2].pt, allVertices[idx].pt) <= 1))))
-      {
-        for (int j = vert_cnt; j < allVertices.Count; ++j)
-          allVertices[j].edges.Clear(); // flag to ignore
-      }
-    }
-
-    private bool AddPaths(Paths64 paths)
-    {
-      int totalVertexCount = 0;
-      foreach (Path64 path in paths)
-        totalVertexCount += path.Count;
-      if (totalVertexCount == 0) return false;
-
-      allVertices.Capacity = allVertices.Count + totalVertexCount;
-      allEdges.Capacity = allEdges.Count + totalVertexCount;
-
-      foreach (Path64 path in paths)
-        AddPath(path);
-
-      return allVertices.Count > 2;
-    }
-
-    private void CleanUp()
-    {
-      allVertices.Clear();
-      allEdges.Clear();
-      allTriangles.Clear();
-      pendingDelaunayStack.Clear();
-      horzEdgeStack.Clear();
-      locMinStack.Clear();
-
-      firstActive = null;
-      lowermostVertex = null;
-    }
-
-    private bool FixupEdgeIntersects()
-    {
-      // precondition - edgeList must be sorted - ascending on edge.vL.pt.X
-
-      for (int i1 = 0; i1 < allEdges.Count; ++i1)
-      {
-        Edge e1 = allEdges[i1];
-        for (int i2 = i1 + 1; i2 < allEdges.Count; ++i2)
-        {
-          Edge e2 = allEdges[i2];
-          if (e2.vL.pt.X >= e1.vR.pt.X)
-            break;
-
-          if (e2.vT.pt.Y < e1.vB.pt.Y && e2.vB.pt.Y > e1.vT.pt.Y &&
-              SegsIntersect(e2.vL.pt, e2.vR.pt, e1.vL.pt, e1.vR.pt) == IntersectKind.intersect)
-          {
-            if (!RemoveIntersection(e2, e1))
-              return false;
-          }
-        }
-      }
-      return true;
-    }
-
-    private void MergeDupOrCollinearVertices()
-    {
-      if (allVertices.Count < 2) return;
-
-      int v1Index = 0;
-      for (int v2Index = 1; v2Index < allVertices.Count; ++v2Index)
-      {
-        Vertex2 v1 = allVertices[v1Index];
-        Vertex2 v2 = allVertices[v2Index];
-
-        if (!v1.pt.Equals(v2.pt))
-        {
-          v1Index = v2Index;
-          continue;
-        }
-
-        // merge v1 & v2
-        if (!v1.innerLM || !v2.innerLM)
-          v1.innerLM = false;
-
-        foreach (Edge e in v2.edges)
-        {
-          if (e.vB == v2) e.vB = v1; else e.vT = v1;
-          if (e.vL == v2) e.vL = v1; else e.vR = v1;
-        }
-
-        v1.edges.AddRange(v2.edges);
-        v2.edges.Clear();
-
-        // excluding horizontals, if pv.edges contains two edges
-        // that are collinear and share the same bottom coords
-        // but have different lengths, split the longer edge at
-        // the top of the shorter edge ...
-        for (int iE = 0; iE < v1.edges.Count; ++iE)
-        {
-          Edge e1 = v1.edges[iE];
-          if (IsHorizontal(e1) || e1.vB != v1) continue;
-
-          for (int iE2 = iE + 1; iE2 < v1.edges.Count; ++iE2)
-          {
-            Edge e2 = v1.edges[iE2];
-            if (e2.vB != v1 || e1.vT.pt.Y == e2.vT.pt.Y ||
-                InternalClipper.CrossProductSign(e1.vT.pt, v1.pt, e2.vT.pt) != 0)
-              continue;
-
-            // parallel edges from v1 up
-            if (e1.vT.pt.Y < e2.vT.pt.Y) SplitEdge(e1, e2);
-            else SplitEdge(e2, e1);
-            break; // only two can be collinear
-          }
-        }
-      }
-    }
-
-    private void SplitEdge(Edge longE, Edge shortE)
-    {
-      Vertex2 oldT = longE.vT;
-      Vertex2 newT = shortE.vT;
-
-      RemoveEdgeFromVertex(oldT, longE);
-
-      longE.vT = newT;
-      if (longE.vL == oldT) longE.vL = newT; else longE.vR = newT;
-
-      newT.edges.Add(longE);
-
-      CreateEdge(newT, oldT, longE.kind);
-    }
-
-    private bool RemoveIntersection(Edge e1, Edge e2)
-    {
-      Vertex2 v = e1.vL;
-      Edge tmpE = e2;
-
-      double d = ShortestDistFromSegment(e1.vL.pt, e2.vL.pt, e2.vR.pt);
-      double d2 = ShortestDistFromSegment(e1.vR.pt, e2.vL.pt, e2.vR.pt);
-      if (d2 < d) { d = d2; v = e1.vR; }
-
-      d2 = ShortestDistFromSegment(e2.vL.pt, e1.vL.pt, e1.vR.pt);
-      if (d2 < d) { d = d2; tmpE = e1; v = e2.vL; }
-
-      d2 = ShortestDistFromSegment(e2.vR.pt, e1.vL.pt, e1.vR.pt);
-      if (d2 < d) { d = d2; tmpE = e1; v = e2.vR; }
-
-      if (d > 1.0)
-        return false; // not a simple rounding intersection
-
-      Vertex2 v2 = tmpE.vT;
-      RemoveEdgeFromVertex(v2, tmpE);
-
-      if (tmpE.vL == v2) tmpE.vL = v; else tmpE.vR = v;
-      tmpE.vT = v;
-      v.edges.Add(tmpE);
-      v.innerLM = false;
-
-      if (tmpE.vB.innerLM && GetLocMinAngle(tmpE.vB) <= 0)
-        tmpE.vB.innerLM = false;
-
-      CreateEdge(v, v2, tmpE.kind);
-      return true;
-    }
-
-    private Edge CreateEdge(Vertex2 v1, Vertex2 v2, EdgeKind k)
-    {
-      Edge res = new Edge();
-      allEdges.Add(res);
-
-      if (v1.pt.Y == v2.pt.Y)
-      {
-        res.vB = v1;
-        res.vT = v2;
-      }
-      else if (v1.pt.Y < v2.pt.Y)
-      {
-        res.vB = v2;
-        res.vT = v1;
-      }
-      else
-      {
-        res.vB = v1;
-        res.vT = v2;
-      }
-
-      if (v1.pt.X <= v2.pt.X)
-      {
-        res.vL = v1;
-        res.vR = v2;
-      }
-      else
-      {
-        res.vL = v2;
-        res.vR = v1;
-      }
-
-      res.kind = k;
-      v1.edges.Add(res);
-      v2.edges.Add(res);
-
-      if (k == EdgeKind.loose)
-      {
-        pendingDelaunayStack.Push(res);
-        AddEdgeToActives(res);
-      }
-
-      return res;
-    }
-
-    private Triangle CreateTriangle(Edge e1, Edge e2, Edge e3)
-    {
-      Triangle tri = new Triangle(e1, e2, e3);
-      allTriangles.Add(tri);
-
-      for (int i = 0; i < 3; ++i)
-      {
-        Edge e = tri.edges[i];
-        if (e.triA != null)
-        {
-          e.triB = tri;
-          RemoveEdgeFromActives(e);
-        }
-        else
-        {
-          e.triA = tri;
-          if (!IsLooseEdge(e))
-            RemoveEdgeFromActives(e);
-        }
-      }
-      return tri;
-    }
-
-    private void ForceLegal(Edge edge)
-    {
-      if (edge.triA == null || edge.triB == null) return;
-
-      Vertex2? vertA = null;
-      Vertex2? vertB = null;
-
-      Edge?[] edgesA = new Edge?[3];
-      Edge?[] edgesB = new Edge?[3];
-      edgesA[0] = null;
-      edgesB[0] = null;
-
-      for (int i = 0; i < 3; ++i)
-      {
-        if (edge.triA!.edges[i] == edge) continue;
-        Edge e = edge.triA.edges[i];
-        switch (EdgeContains(e, edge.vL))
-        {
-          case EdgeContainsResult.left:
-            edgesA[1] = e;
-            vertA = e.vR;
-            break;
-          case EdgeContainsResult.right:
-            edgesA[1] = e;
-            vertA = e.vL;
-            break;
-          default:
-            edgesB[1] = e;
-            break;
-        }
-      }
-
-      for (int i = 0; i < 3; ++i)
-      {
-        if (edge.triB!.edges[i] == edge) continue;
-        Edge e = edge.triB.edges[i];
-        switch (EdgeContains(e, edge.vL))
-        {
-          case EdgeContainsResult.left:
-            edgesA[2] = e;
-            vertB = e.vR;
-            break;
-          case EdgeContainsResult.right:
-            edgesA[2] = e;
-            vertB = e.vL;
-            break;
-          default:
-            edgesB[2] = e;
-            break;
-        }
-      }
-
-      if (vertA == null || vertB == null) return;
-
-      if (InternalClipper.CrossProductSign(vertA.pt, edge.vL.pt, edge.vR.pt) == 0)
-        return;
-
-      // exact, so near-cocircular points can't flip an edge back and forth forever (N972)
-      int ictResult = InCircleSign(vertA.pt, edge.vL.pt, edge.vR.pt, vertB.pt);
-      if (ictResult == 0 ||
-          (RightTurning(vertA.pt, edge.vL.pt, edge.vR.pt) == (ictResult < 0)))
-        return;
-
-      edge.vL = vertA;
-      edge.vR = vertB;
-
-      edge.triA!.edges[0] = edge;
-      for (int i = 1; i < 3; ++i)
-      {
-        Edge eAi = edgesA[i]!;
-        edge.triA.edges[i] = eAi;
-        if (IsLooseEdge(eAi))
-          pendingDelaunayStack.Push(eAi);
-
-        if (eAi.triA == edge.triA || eAi.triB == edge.triA) continue;
-
-        if (eAi.triA == edge.triB)
-          eAi.triA = edge.triA;
-        else if (eAi.triB == edge.triB)
-          eAi.triB = edge.triA;
-        else
-          throw new InvalidOperationException("oops");
-      }
-
-      edge.triB!.edges[0] = edge;
-      for (int i = 1; i < 3; ++i)
-      {
-        Edge eBi = edgesB[i]!;
-        edge.triB.edges[i] = eBi;
-        if (IsLooseEdge(eBi))
-          pendingDelaunayStack.Push(eBi);
-
-        if (eBi.triA == edge.triB || eBi.triB == edge.triB) continue;
-
-        if (eBi.triA == edge.triA)
-          eBi.triA = edge.triB;
-        else if (eBi.triB == edge.triA)
-          eBi.triB = edge.triB;
-        else
-          throw new InvalidOperationException("oops");
-      }
-    }
-
-    private Edge? CreateInnerLocMinLooseEdge(Vertex2 vAbove)
-    {
-      if (firstActive == null) return null;
-
-      long xAbove = vAbove.pt.X;
-      long yAbove = vAbove.pt.Y;
-
-      Edge? e = firstActive;
-      Edge? eBelow = null;
-      double bestD = -1.0;
-
-      while (e != null)
-      {
-        if (e.vL.pt.X <= xAbove && e.vR.pt.X >= xAbove &&
-            e.vB.pt.Y >= yAbove && e.vB != vAbove && e.vT != vAbove &&
-            !LeftTurning(e.vL.pt, vAbove.pt, e.vR.pt))
-        {
-          double d = ShortestDistFromSegment(vAbove.pt, e.vL.pt, e.vR.pt);
-          if (eBelow == null || d < bestD)
-          {
-            eBelow = e;
-            bestD = d;
-          }
-        }
-        e = e.nextE;
-      }
-
-      if (eBelow == null) return null;
-
-      Vertex2 vBest = (eBelow.vT.pt.Y <= yAbove) ? eBelow.vB : eBelow.vT;
-
-      // Make sure no active edge blocks the link from vAbove to vBest. A blocker either
-      // crosses the link or has an end lying on it, and each moves vBest, so the actives
-      // are checked again until the link is clear. (The one-pass check this replaces missed
-      // blockers seen before vBest moved, ends lying on the link, and, when vBest was to the
-      // right of vAbove or straight below it, every blocker, which gave overlapping triangles.)
-      int guard = allEdges.Count + 1;
-      bool moved = true;
-      while (moved && guard-- > 0)
-      {
-        moved = false;
-        for (e = firstActive; e != null; e = e.nextE)
-        {
-          Vertex2? vBlock = GetLinkBlocker(vAbove, vBest, e);
-          if (vBlock == null || vBlock == vBest) continue;
-          vBest = vBlock;
-          moved = true;
-          break;
-        }
-      }
-
-      return CreateEdge(vBest, vAbove, EdgeKind.loose);
-    }
-
-    // returns the vertex the link (vAbove, vBest) should move to when edge e blocks it,
-    // or null when e doesn't block it
-    private static Vertex2? GetLinkBlocker(Vertex2 vAbove, Vertex2 vBest, Edge e)
-    {
-      Point64 a = vAbove.pt, b = vBest.pt;
-      if (e.vB == vAbove || e.vT == vAbove) return null;
-      if (Math.Max(e.vL.pt.X, e.vR.pt.X) < Math.Min(a.X, b.X) ||
-          Math.Min(e.vL.pt.X, e.vR.pt.X) > Math.Max(a.X, b.X) ||
-          e.vB.pt.Y < Math.Min(a.Y, b.Y) || e.vT.pt.Y > Math.Max(a.Y, b.Y)) return null;
-
-      // an end of e lying inside the link
-      if (e.vB != vBest && IsStrictlyInsideSegment(e.vB.pt, a, b)) return e.vB;
-      if (e.vT != vBest && IsStrictlyInsideSegment(e.vT.pt, a, b)) return e.vT;
-      if (e.vB == vBest || e.vT == vBest) return null;
-
-      // e properly crossing the link
-      int s1 = InternalClipper.CrossProductSign(a, b, e.vB.pt);
-      int s2 = InternalClipper.CrossProductSign(a, b, e.vT.pt);
-      int s3 = InternalClipper.CrossProductSign(e.vB.pt, e.vT.pt, a);
-      int s4 = InternalClipper.CrossProductSign(e.vB.pt, e.vT.pt, b);
-      if (s1 * s2 >= 0 || s3 * s4 >= 0) return null;
-      return (e.vT.pt.Y > a.Y) ? e.vT : e.vB;
-    }
-
-    private static bool IsStrictlyInsideSegment(Point64 pt, Point64 a, Point64 b)
-    {
-      if (pt == a || pt == b || InternalClipper.CrossProductSign(a, pt, b) != 0) return false;
-      return pt.X >= Math.Min(a.X, b.X) && pt.X <= Math.Max(a.X, b.X) &&
-        pt.Y >= Math.Min(a.Y, b.Y) && pt.Y <= Math.Max(a.Y, b.Y);
-    }
-
-    private Edge? HorizontalBetween(Vertex2 v1, Vertex2 v2)
-    {
-      long y = v1.pt.Y;
-      long l, r;
-
-      if (v1.pt.X > v2.pt.X)
-      {
-        l = v2.pt.X;
-        r = v1.pt.X;
-      }
-      else
-      {
-        l = v1.pt.X;
-        r = v2.pt.X;
-      }
-
-      Edge? res = firstActive;
-      while (res != null)
-      {
-        if (res.vL.pt.Y == y && res.vR.pt.Y == y &&
-            res.vL.pt.X >= l && res.vR.pt.X <= r &&
-            (res.vL.pt.X != l || res.vL.pt.X != r))
-          break;
-
-        res = res.nextE;
-      }
-      return res;
-    }
-
-    private void DoTriangulateLeft(Edge edge, Vertex2 pivot, long minY)
-    {
-      Vertex2? vAlt = null;
-      Edge? eAlt = null;
-
-      Vertex2 v = (edge.vB == pivot) ? edge.vT : edge.vB;
-
-      foreach (Edge e in pivot.edges)
-      {
-        if (e == edge || !e.isActive) continue;
-
-        Vertex2 vX = (e.vT == pivot) ? e.vB : e.vT;
-        if (vX == v) continue;
-
-        int cps = InternalClipper.CrossProductSign(v.pt, pivot.pt, vX.pt);
-        if (cps == 0)
-        {
-          if ((v.pt.X > pivot.pt.X) == (pivot.pt.X > vX.pt.X)) continue;
-        }
-        else if (cps > 0 || (vAlt != null && !LeftTurning(vX.pt, pivot.pt, vAlt.pt)))
-          continue;
-
-        vAlt = vX;
-        eAlt = e;
-      }
-
-      if (vAlt == null || vAlt.pt.Y < minY || eAlt == null) return;
-
-      if (vAlt.pt.Y < pivot.pt.Y)
-      {
-        if (IsLeftEdge(eAlt)) return;
-      }
-      else if (vAlt.pt.Y > pivot.pt.Y)
-      {
-        if (IsRightEdge(eAlt)) return;
-      }
-
-      Edge? eX = FindLinkingEdge(vAlt, v, (vAlt.pt.Y < v.pt.Y));
-      if (eX == null)
-      {
-        if (vAlt.pt.Y == v.pt.Y && v.pt.Y == minY &&
-            HorizontalBetween(vAlt, v) != null)
-          return;
-
-        eX = CreateEdge(vAlt, v, EdgeKind.loose);
-      }
-
-      CreateTriangle(edge, eAlt, eX);
-
-      if (!EdgeCompleted(eX))
-        DoTriangulateLeft(eX, vAlt, minY);
-    }
-
-    private void DoTriangulateRight(Edge edge, Vertex2 pivot, long minY)
-    {
-      Vertex2? vAlt = null;
-      Edge? eAlt = null;
-
-      Vertex2 v = (edge.vB == pivot) ? edge.vT : edge.vB;
-
-      foreach (Edge e in pivot.edges)
-      {
-        if (e == edge || !e.isActive) continue;
-
-        Vertex2 vX = (e.vT == pivot) ? e.vB : e.vT;
-        if (vX == v) continue;
-
-        int cps = InternalClipper.CrossProductSign(v.pt, pivot.pt, vX.pt);
-        if (cps == 0)
-        {
-          if ((v.pt.X > pivot.pt.X) == (pivot.pt.X > vX.pt.X)) continue;
-        }
-        else if (cps < 0 || (vAlt != null && !RightTurning(vX.pt, pivot.pt, vAlt.pt)))
-          continue;
-
-        vAlt = vX;
-        eAlt = e;
-      }
-
-      if (vAlt == null || vAlt.pt.Y < minY || eAlt == null) return;
-
-      if (vAlt.pt.Y < pivot.pt.Y)
-      {
-        if (IsRightEdge(eAlt)) return;
-      }
-      else if (vAlt.pt.Y > pivot.pt.Y)
-      {
-        if (IsLeftEdge(eAlt)) return;
-      }
-
-      Edge? eX = FindLinkingEdge(vAlt, v, (vAlt.pt.Y > v.pt.Y));
-      if (eX == null)
-      {
-        if (vAlt.pt.Y == v.pt.Y && v.pt.Y == minY &&
-            HorizontalBetween(vAlt, v) != null)
-          return;
-
-        eX = CreateEdge(vAlt, v, EdgeKind.loose);
-      }
-
-      CreateTriangle(edge, eX, eAlt);
-
-      if (!EdgeCompleted(eX))
-        DoTriangulateRight(eX, vAlt, minY);
-    }
-
-    private void AddEdgeToActives(Edge edge)
-    {
-      if (edge.isActive) return;
-
-      edge.prevE = null;
-      edge.nextE = firstActive;
-      edge.isActive = true;
-
-      if (firstActive != null)
-        firstActive.prevE = edge;
-
-      firstActive = edge;
-    }
-
-    private void RemoveEdgeFromActives(Edge edge)
-    {
-      RemoveEdgeFromVertex(edge.vB, edge);
-      RemoveEdgeFromVertex(edge.vT, edge);
-
-      Edge? prev = edge.prevE;
-      Edge? next = edge.nextE;
-
-      if (next != null) next.prevE = prev;
-      if (prev != null) prev.nextE = next;
-
-      edge.isActive = false;
-      if (firstActive == edge) firstActive = next;
+      public Point64 pt;
+      public Node prev = null!;
+      public Node next = null!;
+      public Node(Point64 pt) { this.pt = pt; }
     }
 
     internal TriangulateResult Execute(Paths64 paths, out Paths64 sol)
     {
       sol = new Paths64();
 
-      if (!AddPaths(paths))
+      // 1. drop paths without area, then normalize: a Union gives non-intersecting outers
+      // and holes, nested in a PolyTree, whatever the orientation of the input paths
+      Paths64 input = new Paths64(paths.Count);
+      foreach (Path64 path in paths)
       {
-        return TriangulateResult.noPolygons;
+        Path64 p = Clipper.StripDuplicates(path, true);
+        if (p.Count >= 3 && Clipper.Area(p) != 0) input.Add(p);
       }
+      if (input.Count == 0) return TriangulateResult.noPolygons;
 
-      // if necessary fix path orientation because the algorithm 
-      // expects clockwise outer paths and counter-clockwise inner paths
-      if (lowermostVertex!.innerLM)
+      Clipper64 clipper = new Clipper64 { PreserveCollinear = true };
+      clipper.AddSubject(input);
+      PolyTree64 tree = new PolyTree64();
+      if (!clipper.Execute(ClipType.Union, FillRule.EvenOdd, tree)) return TriangulateResult.fail;
+      if (tree.Count == 0) return TriangulateResult.noPolygons;
+
+      // paths that cross each other (beyond rounding) aren't a valid input
+      if (HasCrossings(input, tree)) return TriangulateResult.pathsIntersect;
+
+      // 2. ear clip each outer with its holes
+      List<Point64[]> triangles = new List<Point64[]>();
+      Int128 twiceRegionArea = 0;
+      Stack<PolyPath64> outers = new Stack<PolyPath64>();
+      foreach (PolyPath64 outer in tree) outers.Push(outer);
+      while (outers.Count > 0)
       {
-        // the orientation of added paths must be wrong, so
-        // 1. reverse innerLM flags ...
-        Vertex2 lm;
-        while (locMinStack.Count > 0)
+        PolyPath64 outer = outers.Pop();
+        List<Path64> holes = new List<Path64>(outer.Count);
+        foreach (PolyPath64 hole in outer)
         {
-          lm = locMinStack.Pop();
-          lm.innerLM = !lm.innerLM;
+          holes.Add(hole.Polygon!);
+          foreach (PolyPath64 island in hole) outers.Push(island);
         }
-        // 2. swap edge kinds
-        foreach (Edge e in allEdges)
-          if (e.kind == EdgeKind.ascend)
-            e.kind = EdgeKind.descend;
-          else
-            e.kind = EdgeKind.ascend;
-      }
-      else
-      {
-        // path orientation is fine so ...
-        while (locMinStack.Count > 0)
-          locMinStack.Pop();
+        twiceRegionArea += TwiceArea(outer.Polygon!);
+        foreach (Path64 hole in holes) twiceRegionArea -= Int128.Abs(TwiceArea(hole));
+        if (!EarClip(outer.Polygon!, holes, triangles)) return TriangulateResult.fail;
       }
 
-      allEdges.Sort((a, b) => a.vL.pt.X.CompareTo(b.vL.pt.X));
-
-      if (!FixupEdgeIntersects())
+      // 3. the triangles must cover the region exactly
+      Int128 twiceTriangleArea = 0;
+      foreach (Point64[] t in triangles)
       {
-        CleanUp();
-        return TriangulateResult.pathsIntersect;
+        if (InternalClipper.CrossProductSign(t[0], t[1], t[2]) <= 0) return TriangulateResult.fail;
+        twiceTriangleArea += TwiceArea(t);
       }
+      if (twiceTriangleArea != Int128.Abs(twiceRegionArea)) return TriangulateResult.fail;
 
-      allVertices.Sort((a, b) =>
-      {
-        if (a.pt.Y == b.pt.Y)
-          return a.pt.X.CompareTo(b.pt.X);
-        return b.pt.Y.CompareTo(a.pt.Y);
-      });
+      // 4. Delaunay
+      if (useDelaunay) Legalize(triangles);
 
-      MergeDupOrCollinearVertices();
-
-      long currY = allVertices[0].pt.Y;
-
-      foreach (Vertex2 v in allVertices)
-      {
-        if (v.edges.Count == 0) continue;
-
-        if (v.pt.Y != currY)
-        {
-          while (locMinStack.Count > 0)
-          {
-            Vertex2 lm = locMinStack.Pop();
-            Edge? e = CreateInnerLocMinLooseEdge(lm);
-            if (e == null)
-            {
-              CleanUp();
-              return TriangulateResult.fail;
-            }
-
-            if (IsHorizontal(e))
-            {
-              if (e.vL == e.vB)
-                DoTriangulateLeft(e, e.vB, currY);
-              else
-                DoTriangulateRight(e, e.vB, currY);
-            }
-            else
-            {
-              DoTriangulateLeft(e, e.vB, currY);
-              if (!EdgeCompleted(e))
-                DoTriangulateRight(e, e.vB, currY);
-            }
-
-            AddEdgeToActives(lm.edges[0]);
-            AddEdgeToActives(lm.edges[1]);
-          }
-
-          while (horzEdgeStack.Count > 0)
-          {
-            Edge e = horzEdgeStack.Pop();
-            if (EdgeCompleted(e)) continue;
-
-            if (e.vB == e.vL)
-            {
-              if (IsLeftEdge(e))
-                DoTriangulateLeft(e, e.vB, currY);
-            }
-            else
-            {
-              if (IsRightEdge(e))
-                DoTriangulateRight(e, e.vB, currY);
-            }
-          }
-
-          currY = v.pt.Y;
-        }
-
-        for (int i = v.edges.Count - 1; i >= 0; --i)
-        {
-          if (i >= v.edges.Count) continue;
-
-          Edge e = v.edges[i];
-          if (EdgeCompleted(e) || IsLooseEdge(e)) continue;
-
-          if (v == e.vB)
-          {
-            if (IsHorizontal(e))
-              horzEdgeStack.Push(e);
-
-            if (!v.innerLM)
-              AddEdgeToActives(e);
-          }
-          else
-          {
-            if (IsHorizontal(e))
-              horzEdgeStack.Push(e);
-            else if (IsLeftEdge(e))
-              DoTriangulateLeft(e, e.vB, v.pt.Y);
-            else
-              DoTriangulateRight(e, e.vB, v.pt.Y);
-          }
-        }
-
-        if (v.innerLM)
-          locMinStack.Push(v);
-      }
-
-      while (horzEdgeStack.Count > 0)
-      {
-        Edge e = horzEdgeStack.Pop();
-        if (!EdgeCompleted(e) && e.vB == e.vL)
-          DoTriangulateLeft(e, e.vB, currY);
-      }
-
-      if (useDelaunay)
-      {
-        while (pendingDelaunayStack.Count > 0)
-        {
-          Edge e = pendingDelaunayStack.Pop();
-          ForceLegal(e);
-        }
-      }
-
-      sol = new Paths64(allTriangles.Count);
-      foreach (Triangle tri in allTriangles)
-      {
-        Path64 p = PathFromTriangle(tri);
-        int cps = InternalClipper.CrossProductSign(p[0], p[1], p[2]);
-        if (cps == 0) continue;
-        if (cps < 0) p.Reverse();
-        sol.Add(p);
-      }
-
-      CleanUp();
+      sol = new Paths64(triangles.Count);
+      foreach (Point64[] t in triangles)
+        sol.Add(new Path64(3) { t[0], t[1], t[2] });
       return TriangulateResult.success;
     }
 
+    private static Int128 TwiceArea(IReadOnlyList<Point64> path)
+    {
+      Int128 sum = 0;
+      for (int i = 0, j = path.Count - 1; i < path.Count; j = i++)
+        sum += (Int128) path[j].X * path[i].Y - (Int128) path[i].X * path[j].Y;
+      return sum;
+    }
+
+    // true when the union made a vertex further than rounding (1 unit) from any input
+    // vertex, which only a crossing does
+    private static bool HasCrossings(Paths64 input, PolyTree64 tree)
+    {
+      HashSet<(long, long)> inputPts = new HashSet<(long, long)>();
+      foreach (Path64 p in input)
+        foreach (Point64 pt in p) inputPts.Add((pt.X, pt.Y));
+
+      Paths64 output = Clipper.PolyTreeToPaths64(tree);
+      foreach (Path64 p in output)
+        foreach (Point64 pt in p)
+        {
+          if (inputPts.Contains((pt.X, pt.Y))) continue;
+          bool near = false;
+          foreach ((long x, long y) in inputPts)
+            if (Math.Abs(x - pt.X) <= 1 && Math.Abs(y - pt.Y) <= 1) { near = true; break; }
+          if (!near) return true;
+        }
+      return false;
+    }
+
     // ---------------------------------------------------------------------
-    // Static / helper functions (C# equivalents of C++ free functions)
+    // Ear clipping. Every ring keeps the region on its left: outers wind
+    // counter-clockwise (positive area) and holes clockwise.
     // ---------------------------------------------------------------------
 
-    private static bool IsLooseEdge(Edge e)
+    private static Node? MakeRing(Path64 path, bool positive)
     {
-      return e.kind == EdgeKind.loose;
-    }
-
-    private static bool IsLeftEdge(Edge e)
-    {
-      return e.kind == EdgeKind.ascend;
-    }
-
-    private static bool IsRightEdge(Edge e)
-    {
-      return e.kind == EdgeKind.descend;
-    }
-
-    private static bool IsHorizontal(Edge e)
-    {
-      return e.vB.pt.Y == e.vT.pt.Y;
-    }
-
-    private static bool LeftTurning(in Point64 p1, in Point64 p2, in Point64 p3)
-    {
-      return InternalClipper.CrossProductSign(p1, p2, p3) < 0;
-    }
-
-    private static bool RightTurning(in Point64 p1, in Point64 p2, in Point64 p3)
-    {
-      return InternalClipper.CrossProductSign(p1, p2, p3) > 0;
-    }
-
-    private static bool EdgeCompleted(Edge edge)
-    {
-      if (edge.triA == null) return false;
-      if (edge.triB != null) return true;
-      return edge.kind != EdgeKind.loose;
-    }
-
-    private static EdgeContainsResult EdgeContains(Edge edge, Vertex2 v)
-    {
-      if (edge.vL == v) return EdgeContainsResult.left;
-      if (edge.vR == v) return EdgeContainsResult.right;
-      return EdgeContainsResult.neither;
-    }
-
-    private static double GetAngle(in Point64 a, in Point64 b, in Point64 c)
-    {
-      double abx = (double) (b.X - a.X);
-      double aby = (double) (b.Y - a.Y);
-      double bcx = (double) (b.X - c.X);
-      double bcy = (double) (b.Y - c.Y);
-      double dp = abx * bcx + aby * bcy;
-      double cp = abx * bcy - aby * bcx;
-      return Math.Atan2(cp, dp);
-    }
-
-    private static double GetLocMinAngle(Vertex2 v)
-    {
-      int asc, des;
-      if (v.edges[0].kind == EdgeKind.ascend)
+      bool isPositive = TwiceArea(path) > 0;
+      Node? first = null, last = null;
+      for (int k = 0; k < path.Count; k++)
       {
-        asc = 0;
-        des = 1;
+        Point64 pt = path[(isPositive == positive) ? k : path.Count - 1 - k];
+        Node n = new Node(pt);
+        if (first == null) first = n;
+        else
+        {
+          last!.next = n;
+          n.prev = last;
+        }
+        last = n;
       }
-      else
-      {
-        des = 0;
-        asc = 1;
-      }
-      return GetAngle(v.edges[des].vT.pt, v.pt, v.edges[asc].vT.pt);
+      if (first == null) return null;
+      last!.next = first;
+      first.prev = last;
+      return first;
     }
 
-    private static void RemoveEdgeFromVertex(Vertex2 vert, Edge edge)
+    // Inserts into each edge every vertex (of any of these rings) that lies strictly inside
+    // it, so a ring that touches an edge (a hole touching its outer, or a ring touching
+    // itself) shares a vertex there, which bridging and ear clipping can handle.
+    private static List<Path64> Conform(List<Path64> rings)
     {
-      int idx = vert.edges.IndexOf(edge);
-      if (idx < 0) throw new InvalidOperationException("oops!");
-      vert.edges.RemoveAt(idx);
+      List<Point64> all = new List<Point64>();
+      foreach (Path64 r in rings) all.AddRange(r);
+      all.Sort((p, q) => p.X != q.X ? p.X.CompareTo(q.X) : p.Y.CompareTo(q.Y));
+
+      List<Path64> result = new List<Path64>(rings.Count);
+      List<Point64> inside = new List<Point64>();
+      foreach (Path64 r in rings)
+      {
+        Path64 res = new Path64(r.Count);
+        for (int i = 0; i < r.Count; i++)
+        {
+          Point64 p = r[i], q = r[(i + 1) % r.Count];
+          res.Add(p);
+          long minX = Math.Min(p.X, q.X), maxX = Math.Max(p.X, q.X);
+          long minY = Math.Min(p.Y, q.Y), maxY = Math.Max(p.Y, q.Y);
+          inside.Clear();
+          // the vertices are sorted by X, so only those in the edge's X range are visited
+          int lo = 0, hi = all.Count;
+          while (lo < hi)
+          {
+            int mid = (lo + hi) / 2;
+            if (all[mid].X < minX) lo = mid + 1; else hi = mid;
+          }
+          for (int k = lo; k < all.Count && all[k].X <= maxX; k++)
+          {
+            Point64 v = all[k];
+            if (v.Y < minY || v.Y > maxY || v == p || v == q) continue;
+            if (InternalClipper.CrossProductSign(p, v, q) != 0) continue;
+            if (inside.Count == 0 || inside[^1] != v) inside.Add(v);
+          }
+          if (inside.Count == 0) continue;
+          inside.Sort((u, v) =>
+          {
+            Int128 du = (Int128) (u.X - p.X) * (u.X - p.X) + (Int128) (u.Y - p.Y) * (u.Y - p.Y);
+            Int128 dv = (Int128) (v.X - p.X) * (v.X - p.X) + (Int128) (v.Y - p.Y) * (v.Y - p.Y);
+            return du.CompareTo(dv);
+          });
+          for (int k = 0; k < inside.Count; k++)
+            if (k == 0 || inside[k] != inside[k - 1]) res.Add(inside[k]);
+        }
+        result.Add(res);
+      }
+      return result;
     }
 
-    private static bool FindLocMinIdx(Path64 path, int len, ref int idx)
+    // Splits a ring at every point it passes more than once, into loops that don't
+    private static void Decompose(Path64 ring, List<Path64> loops)
     {
-      if (len < 3) return false;
-      int i0 = idx;
-      int n = (idx + 1) % len;
-
-      while (path[n].Y <= path[idx].Y)
+      List<Point64> cur = new List<Point64>(ring.Count);
+      Dictionary<(long, long), int> at = new Dictionary<(long, long), int>();
+      foreach (Point64 pt in ring)
       {
-        idx = n;
-        n = (n + 1) % len;
-        if (idx == i0) return false;
+        if (at.TryGetValue((pt.X, pt.Y), out int i))
+        {
+          // cur[i] == pt: cur[i .. end] is a loop of its own
+          Path64 loop = new Path64(cur.Count - i);
+          for (int k = i; k < cur.Count; k++)
+          {
+            loop.Add(cur[k]);
+            if (k > i) at.Remove((cur[k].X, cur[k].Y));
+          }
+          loops.Add(loop);
+          cur.RemoveRange(i + 1, cur.Count - i - 1);
+        }
+        else
+        {
+          at.Add((pt.X, pt.Y), cur.Count);
+          cur.Add(pt);
+        }
       }
+      loops.Add(new Path64(cur));
+    }
 
-      while (path[n].Y >= path[idx].Y)
+    // true when hole lies inside outer: decided by the first hole vertex that isn't on outer's
+    // edge (a hole touching its outer everywhere counts as inside)
+    private static bool HoleInside(Path64 hole, Path64 outer)
+    {
+      foreach (Point64 pt in hole)
       {
-        idx = n;
-        n = (n + 1) % len;
+        PointInPolygonResult pip = InternalClipper.PointInPolygon(pt, outer);
+        if (pip != PointInPolygonResult.IsOn) return pip == PointInPolygonResult.IsInside;
       }
-
       return true;
     }
 
-    private static int Prev(int idx, int len)
+    // Splits one outer and its holes into simple outers with their simple holes: rings are
+    // made to share a vertex wherever one touches another's edge, then split at every point
+    // they pass twice. Loops of positive area are outers, negative ones holes, and each hole
+    // goes to the smallest outer around it.
+    private static bool EarClip(Path64 outer, List<Path64> holes, List<Point64[]> triangles)
     {
-      if (idx == 0) return len - 1;
-      return (idx - 1);
-    }
+      List<Path64> rings = Conform(new List<Path64>(holes) { outer });
+      List<Path64> loops = new List<Path64>();
+      foreach (Path64 r in rings) Decompose(r, loops);
 
-    private static int Next(int idx, int len)
-    {
-      idx = ((idx + 1) % len);
-      return idx;
-    }
-
-    private static Edge? FindLinkingEdge(Vertex2 vert1, Vertex2 vert2, bool preferAscending)
-    {
-      Edge? res = null;
-      foreach (Edge e in vert1.edges)
+      List<(Path64 path, Int128 area, List<Path64> holes)> outers = new List<(Path64, Int128, List<Path64>)>();
+      List<Path64> loopHoles = new List<Path64>();
+      foreach (Path64 loop in loops)
       {
-        if (e.vL == vert2 || e.vR == vert2)
+        if (loop.Count < 3) continue;
+        Int128 a = TwiceArea(loop);
+        if (a > 0) outers.Add((loop, a, new List<Path64>()));
+        else if (a < 0) loopHoles.Add(loop);
+      }
+      outers.Sort((x, y) => x.area.CompareTo(y.area));
+      foreach (Path64 h in loopHoles)
+      {
+        Rect64 hb = Clipper.GetBounds(h);
+        bool placed = false;
+        foreach ((Path64 path, Int128 _, List<Path64> its) in outers)
         {
-          if (e.kind == EdgeKind.loose ||
-              ((e.kind == EdgeKind.ascend) == preferAscending))
-            return e;
-          res = e;
+          Rect64 ob = Clipper.GetBounds(path);
+          if (hb.left < ob.left || hb.right > ob.right || hb.top < ob.top || hb.bottom > ob.bottom) continue;
+          if (!HoleInside(h, path)) continue;
+          its.Add(h);
+          placed = true;
+          break;
+        }
+        if (!placed) return false;
+      }
+
+      foreach ((Path64 path, Int128 _, List<Path64> its) in outers)
+        if (!EarClipSimple(path, its, triangles)) return false;
+      return true;
+    }
+
+    private static bool EarClipSimple(Path64 outer, List<Path64> holes, List<Point64[]> triangles)
+    {
+      Node? ring = MakeRing(outer, true);
+      if (ring == null) return true;
+
+      if (holes.Count > 0)
+      {
+        // every ring, for the bridge visibility tests
+        List<Node> allRings = new List<Node> { ring };
+        List<Node> holeStarts = new List<Node>(holes.Count);
+        foreach (Path64 hole in holes)
+        {
+          Node? h = MakeRing(hole, false);
+          if (h == null) continue;
+          allRings.Add(h);
+          holeStarts.Add(Leftmost(h));
+        }
+        // bridge holes from left to right, so a hole's bridge never meets an unbridged hole
+        holeStarts.Sort((a, b) => a.pt.X != b.pt.X ? a.pt.X.CompareTo(b.pt.X) : a.pt.Y.CompareTo(b.pt.Y));
+        foreach (Node h in holeStarts)
+        {
+          Node? bridge = FindBridge(h, ring, allRings);
+          if (bridge == null) return false;
+          SplitRing(bridge, h);
         }
       }
-      return res;
+
+      // where the ring touches itself, separate pieces that only share a point are clipped
+      // on their own
+      foreach (Node piece in SplitPinches(ring))
+        if (!ClipEars(piece, triangles)) return false;
+      return true;
     }
 
-    private static Path64 PathFromTriangle(Triangle tri)
+    private static Int128 TwiceArea(Node start, Node end)
     {
-      Path64 res = new Path64(3)
+      // the loop start .. end, closed back to start
+      Int128 sum = 0;
+      Node p = start;
+      while (true)
+      {
+        Node q = (p == end) ? start : p.next;
+        sum += (Int128) p.pt.X * q.pt.Y - (Int128) q.pt.X * p.pt.Y;
+        if (p == end) break;
+        p = p.next;
+      }
+      return sum;
+    }
+
+    // Splits a ring wherever it passes the same point twice and both loops there enclose
+    // area (pieces touching at a point). Loops without area are dropped. A loop of negative
+    // area is a hole attached at that point, so the ring isn't split there.
+    private static List<Node> SplitPinches(Node ring)
+    {
+      List<Node> done = new List<Node>();
+      Stack<Node> todo = new Stack<Node>();
+      todo.Push(ring);
+      while (todo.Count > 0)
+      {
+        Node start = todo.Pop();
+        Dictionary<(long, long), List<Node>> seen = new Dictionary<(long, long), List<Node>>();
+        Node p = start;
+        do
+        {
+          if (!seen.TryGetValue((p.pt.X, p.pt.Y), out List<Node>? list))
+            seen.Add((p.pt.X, p.pt.Y), list = new List<Node>());
+          list.Add(p);
+          p = p.next;
+        } while (p != start);
+
+        bool split = false;
+        foreach (List<Node> list in seen.Values)
+        {
+          for (int i = 0; i < list.Count && !split; i++)
+            for (int j = i + 1; j < list.Count && !split; j++)
             {
-                tri.edges[0].vL.pt,
-                tri.edges[0].vR.pt
-            };
-      Edge e = tri.edges[1];
-      if (e.vL.pt.Equals(res[0]) || e.vL.pt.Equals(res[1]))
-        res.Add(e.vR.pt);
-      else
-        res.Add(e.vL.pt);
-      return res;
+              Node a = list[i], b = list[j];
+              Int128 area1 = TwiceArea(a, b.prev), area2 = TwiceArea(b, a.prev);
+              if (area1 < 0 || area2 < 0) continue;
+              // loop 1: a .. b.prev, loop 2: b .. a.prev
+              Node aPrev = a.prev, bPrev = b.prev;
+              a.prev = bPrev; bPrev.next = a;
+              b.prev = aPrev; aPrev.next = b;
+              if (area1 > 0) todo.Push(a);
+              if (area2 > 0) todo.Push(b);
+              split = true;
+            }
+          if (split) break;
+        }
+        if (!split) done.Add(start);
+      }
+      return done;
+    }
+
+    private static Node Leftmost(Node start)
+    {
+      Node best = start, p = start.next;
+      while (p != start)
+      {
+        if (p.pt.X < best.pt.X || (p.pt.X == best.pt.X && p.pt.Y < best.pt.Y)) best = p;
+        p = p.next;
+      }
+      return best;
+    }
+
+    // true when the direction from v to q points into the region at v
+    // (the region lies left of the edges prev->v and v->next)
+    private static bool LocallyInside(Node v, Point64 q)
+    {
+      Point64 a = v.prev.pt, b = v.next.pt, p = v.pt;
+      int turn = InternalClipper.CrossProductSign(a, p, b);
+      bool leftOfOut = InternalClipper.CrossProductSign(p, b, q) > 0;
+      bool leftOfIn = InternalClipper.CrossProductSign(a, p, q) > 0;
+      return (turn > 0) ? (leftOfOut && leftOfIn) : (leftOfOut || leftOfIn);
+    }
+
+    // true when segment a-b crosses an edge of any ring or passes through a vertex
+    // (shared end positions don't count)
+    private static bool SegmentBlocked(Point64 a, Point64 b, List<Node> rings)
+    {
+      long minX = Math.Min(a.X, b.X), maxX = Math.Max(a.X, b.X);
+      long minY = Math.Min(a.Y, b.Y), maxY = Math.Max(a.Y, b.Y);
+      foreach (Node start in rings)
+      {
+        Node p = start;
+        do
+        {
+          Point64 c = p.pt, d = p.next.pt;
+          p = p.next;
+          if (Math.Max(c.X, d.X) < minX || Math.Min(c.X, d.X) > maxX ||
+              Math.Max(c.Y, d.Y) < minY || Math.Min(c.Y, d.Y) > maxY) continue;
+          if (c != a && c != b && IsOnSegment(c, a, b)) return true;
+          if (c == a || c == b || d == a || d == b) continue;
+          int s1 = InternalClipper.CrossProductSign(a, b, c);
+          int s2 = InternalClipper.CrossProductSign(a, b, d);
+          if (s1 * s2 >= 0) continue;
+          int s3 = InternalClipper.CrossProductSign(c, d, a);
+          int s4 = InternalClipper.CrossProductSign(c, d, b);
+          if (s3 * s4 < 0) return true;
+        } while (p != start);
+      }
+      return false;
+    }
+
+    private static bool IsOnSegment(Point64 pt, Point64 a, Point64 b)
+    {
+      return InternalClipper.CrossProductSign(a, pt, b) == 0 &&
+        pt.X >= Math.Min(a.X, b.X) && pt.X <= Math.Max(a.X, b.X) &&
+        pt.Y >= Math.Min(a.Y, b.Y) && pt.Y <= Math.Max(a.Y, b.Y);
+    }
+
+    // the nearest vertex of the outer ring (holes already bridged in) that hole vertex h
+    // can be joined to without crossing anything
+    private static Node? FindBridge(Node h, Node ring, List<Node> allRings)
+    {
+      List<(Int128 d, Node n)> candidates = new List<(Int128, Node)>();
+      Node p = ring;
+      do
+      {
+        if (p.pt == h.pt)
+        {
+          // the hole touches the outer here: a zero length bridge
+          if (LocallyInside(p, h.next.pt) || LocallyInside(p, h.prev.pt)) return p;
+        }
+        else
+        {
+          Int128 dx = p.pt.X - h.pt.X, dy = p.pt.Y - h.pt.Y;
+          candidates.Add((dx * dx + dy * dy, p));
+        }
+        p = p.next;
+      } while (p != ring);
+
+      candidates.Sort((x, y) => x.d.CompareTo(y.d));
+      foreach ((Int128 _, Node n) in candidates)
+      {
+        if (!LocallyInside(n, h.pt) || !LocallyInside(h, n.pt)) continue;
+        if (SegmentBlocked(h.pt, n.pt, allRings)) continue;
+        return n;
+      }
+      return null;
+    }
+
+    // joins ring node a to node b of another ring by a two-way bridge (copies of a and b)
+    private static void SplitRing(Node a, Node b)
+    {
+      Node a2 = new Node(a.pt), b2 = new Node(b.pt);
+      Node an = a.next, bp = b.prev;
+      a.next = b; b.prev = a;
+      a2.next = an; an.prev = a2;
+      b2.next = a2; a2.prev = b2;
+      bp.next = b2; b2.prev = bp;
+    }
+
+    // true when the triangle (a, b, c) at node ear can be clipped: it is convex, no other
+    // vertex lies inside it or on its edges, no edge crosses its diagonal a-c, and no edge
+    // from a copy of one of its corners (where a ring touches itself, or at a bridge) enters it
+    private static bool IsEar(Node ear)
+    {
+      Point64 a = ear.prev.pt, b = ear.pt, c = ear.next.pt;
+      if (InternalClipper.CrossProductSign(a, b, c) <= 0) return false; // reflex or flat
+
+      long minX = Math.Min(a.X, Math.Min(b.X, c.X)), maxX = Math.Max(a.X, Math.Max(b.X, c.X));
+      long minY = Math.Min(a.Y, Math.Min(b.Y, c.Y)), maxY = Math.Max(a.Y, Math.Max(b.Y, c.Y));
+      for (Node p = ear.next.next; p != ear.prev; p = p.next)
+      {
+        Point64 q = p.pt, r = p.next.pt;
+
+        // the edge p -> p.next crossing the diagonal
+        if (Math.Max(q.X, r.X) >= minX && Math.Min(q.X, r.X) <= maxX &&
+            Math.Max(q.Y, r.Y) >= minY && Math.Min(q.Y, r.Y) <= maxY &&
+            q != a && q != c && r != a && r != c &&
+            InternalClipper.CrossProductSign(a, c, q) * InternalClipper.CrossProductSign(a, c, r) < 0 &&
+            InternalClipper.CrossProductSign(q, r, a) * InternalClipper.CrossProductSign(q, r, c) < 0)
+          return false;
+
+        if (q.X < minX || q.X > maxX || q.Y < minY || q.Y > maxY) continue;
+        if (q == a || q == b || q == c)
+        {
+          if (EntersCorner(a, b, c, q, p.prev.pt) || EntersCorner(a, b, c, q, p.next.pt)) return false;
+          continue;
+        }
+        if (InternalClipper.CrossProductSign(a, b, q) >= 0 &&
+            InternalClipper.CrossProductSign(b, c, q) >= 0 &&
+            InternalClipper.CrossProductSign(c, a, q) >= 0) return false;
+      }
+      return true;
+    }
+
+    // true when the edge from corner k of the counter-clockwise triangle (a, b, c) towards q
+    // points strictly into the triangle
+    private static bool EntersCorner(Point64 a, Point64 b, Point64 c, Point64 k, Point64 q)
+    {
+      if (k == a)
+        return InternalClipper.CrossProductSign(a, b, q) > 0 && InternalClipper.CrossProductSign(c, a, q) > 0;
+      if (k == b)
+        return InternalClipper.CrossProductSign(b, c, q) > 0 && InternalClipper.CrossProductSign(a, b, q) > 0;
+      return InternalClipper.CrossProductSign(c, a, q) > 0 && InternalClipper.CrossProductSign(b, c, q) > 0;
+    }
+
+    private static void Remove(Node n)
+    {
+      n.prev.next = n.next;
+      n.next.prev = n.prev;
+    }
+
+    // removes vertices that add nothing: repeats, and the middle of three collinear vertices
+    // (straight runs and zero-width spikes). Returns a remaining node, or null when fewer than
+    // three are left.
+    private static Node? FilterRing(Node start)
+    {
+      Node p = start;
+      int guard = 0;
+      bool again = true;
+      while (again)
+      {
+        again = false;
+        Node stop = p;
+        do
+        {
+          if (p.next == p.prev) return null;
+          if (p.pt == p.next.pt || InternalClipper.CrossProductSign(p.prev.pt, p.pt, p.next.pt) == 0)
+          {
+            Node prev = p.prev;
+            Remove(p);
+            p = prev;
+            again = true;
+            if (++guard > 1 << 30) return null;
+            break;
+          }
+          p = p.next;
+        } while (p != stop);
+      }
+      return p.next == p.prev ? null : p;
+    }
+
+    // a vertex that adds nothing: it repeats its neighbour's position, or the ring turns back
+    // on itself there (a zero-width spike)
+    private static bool IsSpike(Node n)
+    {
+      Point64 a = n.prev.pt, b = n.pt, c = n.next.pt;
+      if (a == c) return true;
+      if (InternalClipper.CrossProductSign(a, b, c) != 0) return false;
+      return (Int128) (b.X - a.X) * (c.X - b.X) + (Int128) (b.Y - a.Y) * (c.Y - b.Y) < 0;
+    }
+
+    // removes repeats and spikes at n and next to it, as they cascade. Returns a node where
+    // n was, or null when fewer than three nodes are left.
+    private static Node? RemoveDegenerate(Node n)
+    {
+      while (true)
+      {
+        if (n.next == n || n.next == n.prev) return null;
+        if (n.pt == n.next.pt) { Remove(n.next); continue; }
+        if (IsSpike(n)) { Node p = n.prev; Remove(n); n = p; continue; }
+        if (IsSpike(n.next)) { Remove(n.next); continue; }
+        return n;
+      }
+    }
+
+    private static bool ClipEars(Node ring, List<Point64[]> triangles)
+    {
+      Node ear = ring;
+      Node stop = ear;
+      bool filtered = false;
+      while (ear.prev != ear.next)
+      {
+        if (IsEar(ear))
+        {
+          triangles.Add(new[] { ear.prev.pt, ear.pt, ear.next.pt });
+          Node next = ear.next;
+          Remove(ear);
+          // the cut can leave repeats or zero-width spikes (where the ring touched itself),
+          // which must go before they look like ears
+          Node? n = RemoveDegenerate(next);
+          if (n != null) n = RemoveDegenerate(n.prev);
+          if (n == null) return true; // nothing with area is left
+          ear = n.next;
+          stop = ear;
+          filtered = false;
+          continue;
+        }
+
+        ear = ear.next;
+        if (ear != stop) continue;
+
+        // a whole pass without an ear: drop vertices that add nothing and try again
+        if (filtered) return false;
+        Node? f = FilterRing(ear);
+        if (f == null) return true; // nothing with area is left
+        ear = f;
+        stop = ear;
+        filtered = true;
+      }
+      return true;
+    }
+
+    // ---------------------------------------------------------------------
+    // Delaunay: Lawson edge flips with the exact in-circle test
+    // ---------------------------------------------------------------------
+
+    private static void Legalize(List<Point64[]> triangles)
+    {
+      // vertices by position, triangles as counter-clockwise index triples
+      Dictionary<(long, long), int> index = new Dictionary<(long, long), int>();
+      List<Point64> pts = new List<Point64>();
+      int[][] tris = new int[triangles.Count][];
+      for (int t = 0; t < triangles.Count; t++)
+      {
+        tris[t] = new int[3];
+        for (int k = 0; k < 3; k++)
+        {
+          Point64 pt = triangles[t][k];
+          if (!index.TryGetValue((pt.X, pt.Y), out int i))
+          {
+            i = pts.Count;
+            pts.Add(pt);
+            index.Add((pt.X, pt.Y), i);
+          }
+          tris[t][k] = i;
+        }
+      }
+
+      // each directed edge to its triangle; an edge used twice in one direction (where rings
+      // touch) is left alone
+      Dictionary<(int, int), int> edges = new Dictionary<(int, int), int>();
+      HashSet<(int, int)> fixedEdges = new HashSet<(int, int)>();
+      for (int t = 0; t < tris.Length; t++)
+        for (int k = 0; k < 3; k++)
+        {
+          (int, int) e = (tris[t][k], tris[t][(k + 1) % 3]);
+          if (!edges.TryAdd(e, t)) fixedEdges.Add(e);
+        }
+
+      Stack<(int, int)> pending = new Stack<(int, int)>(edges.Keys);
+      long guard = 64L * tris.Length * tris.Length + 1024;
+      while (pending.Count > 0 && guard-- > 0)
+      {
+        (int u, int v) = pending.Pop();
+        if (fixedEdges.Contains((u, v)) || fixedEdges.Contains((v, u))) continue;
+        if (!edges.TryGetValue((u, v), out int t1) || !edges.TryGetValue((v, u), out int t2)) continue;
+        int w = Third(tris[t1], u, v), x = Third(tris[t2], v, u);
+
+        // (u, v, w) is counter-clockwise, so a positive sign means x is inside its circle
+        if (InCircleSign(pts[u], pts[v], pts[w], pts[x]) <= 0) continue;
+        // the new triangles must be proper (the quad must be convex)
+        if (InternalClipper.CrossProductSign(pts[u], pts[x], pts[w]) <= 0 ||
+            InternalClipper.CrossProductSign(pts[x], pts[v], pts[w]) <= 0) continue;
+        if (edges.ContainsKey((x, w)) || edges.ContainsKey((w, x))) continue;
+
+        foreach (int[] tri in new[] { tris[t1], tris[t2] })
+          for (int k = 0; k < 3; k++) edges.Remove((tri[k], tri[(k + 1) % 3]));
+        tris[t1] = new[] { u, x, w };
+        tris[t2] = new[] { x, v, w };
+        foreach (int t in new[] { t1, t2 })
+          for (int k = 0; k < 3; k++) edges[(tris[t][k], tris[t][(k + 1) % 3])] = t;
+
+        pending.Push((u, x));
+        pending.Push((x, v));
+        pending.Push((v, w));
+        pending.Push((w, u));
+      }
+
+      for (int t = 0; t < tris.Length; t++)
+        triangles[t] = new[] { pts[tris[t][0]], pts[tris[t][1]], pts[tris[t][2]] };
+    }
+
+    private static int Third(int[] tri, int a, int b)
+    {
+      for (int k = 0; k < 3; k++)
+        if (tri[k] != a && tri[k] != b) return tri[k];
+      return tri[0];
     }
 
     private const long InCircleInt128Limit = 1L << 30;
@@ -1090,7 +705,7 @@ namespace Clipper2Lib
     // The exact sign of the in-circle determinant of ptD against the circle through ptA, ptB
     // and ptC (positive when ptD is inside for a counter-clockwise ptA, ptB, ptC). Evaluated
     // in double, the determinant is rounding noise for near-cocircular points with large
-    // coordinates, and ForceLegal then flipped an edge back and forth forever (NodeFlow N972).
+    // coordinates, and edge flipping then never ended (NodeFlow N972).
     // With every difference below 2^30 the determinant stays below 2^125, so Int128 is exact;
     // larger differences use BigInteger.
     internal static int InCircleSign(Point64 ptA, Point64 ptB, Point64 ptC, Point64 ptD)
@@ -1117,82 +732,5 @@ namespace Clipper2Lib
         return det.Sign;
       }
     }
-
-    private static double ShortestDistFromSegment(in Point64 pt, in Point64 segPt1, in Point64 segPt2)
-    {
-      double dx = (double) (segPt2.X - segPt1.X);
-      double dy = (double) (segPt2.Y - segPt1.Y);
-
-      double ax = (double) (pt.X - segPt1.X);
-      double ay = (double) (pt.Y - segPt1.Y);
-
-      double qNum = ax * dx + ay * dy;
-      double denom = Sqr(dx) + Sqr(dy);
-
-      if (qNum < 0)
-        return DistanceSqr(pt, segPt1);
-      if (qNum > denom)
-        return DistanceSqr(pt, segPt2);
-
-      return Sqr(ax * dy - dx * ay) / denom;
-    }
-
-    private static IntersectKind SegsIntersect(Point64 s1a, Point64 s1b, Point64 s2a, Point64 s2b)
-    {
-      //ignore segments sharing an end-point
-      if (s1a == s2a || s1a == s2b || s1b == s2b) return IntersectKind.none;
-
-      double dy1 = (double) (s1b.Y - s1a.Y);
-      double dx1 = (double) (s1b.X - s1a.X);
-      double dy2 = (double) (s2b.Y - s2a.Y);
-      double dx2 = (double) (s2b.X - s2a.X);
-
-      double cp = dy1 * dx2 - dy2 * dx1;
-      if (cp == 0) return IntersectKind.collinear;
-
-      double t = ((double) (s1a.X - s2a.X) * dy2 -
-                  (double) (s1a.Y - s2a.Y) * dx2);
-      if (t >= 0)
-      {
-        if (cp < 0 || t >= cp) return IntersectKind.none;
-      }
-      else
-      {
-        if (cp > 0 || t <= cp) return IntersectKind.none;
-      }
-
-      t = ((double) (s1a.X - s2a.X) * dy1 -
-           (double) (s1a.Y - s2a.Y) * dx1);
-      if (t >= 0)
-      {
-        if (cp > 0 && t < cp) return IntersectKind.intersect;
-      }
-      else
-      {
-        if (cp < 0 && t > cp) return IntersectKind.intersect;
-      }
-
-      return IntersectKind.none;
-    }
-
-    private static double DistSqr(in Point64 pt1, in Point64 pt2)
-    {
-      return Sqr((double) (pt1.X - pt2.X)) + Sqr((double) (pt1.Y - pt2.Y));
-    }
-
-    // These are placeholders to be wired to your Clipper2 C# math helpers.
-    // Replace with actual implementations if different.
-    private static double Sqr(double v)
-    {
-      return v * v;
-    }
-
-    private static double DistanceSqr(in Point64 a, in Point64 b)
-    {
-      double dx = (double) (a.X - b.X);
-      double dy = (double) (a.Y - b.Y);
-      return dx * dx + dy * dy;
-    }
   }
-
 }
