@@ -493,6 +493,9 @@ namespace Clipper2Lib
     Negative
   }
 
+  // nb: the C++ library turns off FP contraction (a * b + c fused into one rounding) so that
+  // its results don't depend on the compiler (872bfa0). .NET never contracts a * b + c into an
+  // FMA on its own (only an explicit Math.FusedMultiplyAdd does), so the C# needs no equivalent.
   public static class InternalClipper
   {
     internal const long MaxInt64 = 9223372036854775807;
@@ -516,27 +519,7 @@ namespace Clipper2Lib
 
     public static int CrossProductSign(Point64 pt1, Point64 pt2, Point64 pt3)
     {
-      long a = pt2.X - pt1.X;
-      long b = pt3.Y - pt2.Y;
-      long c = pt2.Y - pt1.Y;
-      long d = pt3.X - pt2.X;
-      UInt128Struct ab = MultiplyUInt64((ulong) Math.Abs(a), (ulong) Math.Abs(b));
-      UInt128Struct cd = MultiplyUInt64((ulong) Math.Abs(c), (ulong) Math.Abs(d));
-      int signAB = TriSign(a) * TriSign(b);
-      int signCD = TriSign(c) * TriSign(d);
-
-      if (signAB == signCD)
-      {
-        int result;
-        if (ab.hi64 == cd.hi64)
-        {
-          if (ab.lo64 == cd.lo64) return 0;
-          result = (ab.lo64 > cd.lo64) ? 1 : -1;
-        }
-        else result = (ab.hi64 > cd.hi64) ? 1 : -1;
-        return (signAB > 0) ? result : -result;
-      }
-      return (signAB > signCD) ? 1 : -1;
+      return CompareProducts(pt2.X - pt1.X, pt3.Y - pt2.Y, pt2.Y - pt1.Y, pt3.X - pt2.X);
     }
 
 #if USINGZ
@@ -585,23 +568,36 @@ namespace Clipper2Lib
       return result;
     }
 
+    // Rounds like std::nearbyint in round-to-nearest mode (ties to even), for val within
+    // the long range. .NET has no other rounding mode, so this matches the C++ default.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static long RoundToInt64(double val)
+    {
+      return (long) Math.Round(val, MidpointRounding.ToEven);
+    }
+
+    // The signed 128 bit product a * b, split so that (hi, lo) pairs order like the products
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static (long hi, ulong lo) MultiplyInt64(long a, long b)
+    {
+      long hi = Math.BigMul(a, b, out long lo);
+      return (hi, (ulong) lo);
+    }
+
+    // returns 1, 0 or -1 as a * b is greater than, equal to or less than c * d
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int CompareProducts(long a, long b, long c, long d)
+    {
+      Int128 ab = (Int128) a * b;
+      Int128 cd = (Int128) c * d;
+      return (ab > cd) ? 1 : (ab < cd) ? -1 : 0;
+    }
+
     // returns true if (and only if) a * b == c * d
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static bool ProductsAreEqual(long a, long b, long c, long d)
     {
-      // nb: unsigned values will be needed for CalcOverflowCarry()
-      ulong absA = (ulong) Math.Abs(a);
-      ulong absB = (ulong) Math.Abs(b);
-      ulong absC = (ulong) Math.Abs(c);
-      ulong absD = (ulong) Math.Abs(d);
-
-      UInt128Struct mul_ab = MultiplyUInt64(absA, absB);
-      UInt128Struct mul_cd = MultiplyUInt64(absC, absD);
-
-      // nb: it's important to differentiate 0 values here from other values
-      int sign_ab = TriSign(a) * TriSign(b);
-      int sign_cd = TriSign(c) * TriSign(d);
-
-      return mul_ab.lo64 == mul_cd.lo64 && mul_ab.hi64 == mul_cd.hi64 && sign_ab == sign_cd;
+      return CompareProducts(a, b, c, d) == 0;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -178,5 +178,21 @@ namespace Clipper2Lib.UnitTests
       Assert.AreEqual(3, solution[0].Count);
       Assert.AreEqual(Clipper.IsPositive(subject[0]), Clipper.IsPositive(solution[0]));
     }
+      [TestMethod]
+    [Ignore("Task 6: needs the rounded GetLineIntersectPt from f774daf")]
+    public void TestIntersectPointIsNotFused()
+    {
+      // both exact intersections have a coordinate of -100.5, and the tie rounds to even unless
+      // the multiply and add in GetLineIntersectPt are fused into one rounding. .NET never
+      // contracts a * b + c into an FMA on its own, so this guards the rounding itself.
+      Assert.IsTrue(InternalClipper.GetLineIntersectPt(new Point64(-207, -383), new Point64(350, 194),
+        new Point64(347, 193), new Point64(-206, -384), out Point64 ip));
+      Assert.AreEqual(66L, ip.X);
+      Assert.AreEqual(-100L, ip.Y);
+      Assert.IsTrue(InternalClipper.GetLineIntersectPt(new Point64(-383, -207), new Point64(194, 350),
+        new Point64(193, 347), new Point64(-384, -206), out ip));
+      Assert.AreEqual(-100L, ip.X);
+      Assert.AreEqual(66L, ip.Y);
+    }
   }
 }

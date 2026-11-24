@@ -59,5 +59,40 @@ namespace Clipper2Lib.UnitTests
       clipper.Execute(ClipType.Union, FillRule.EvenOdd, solution);
       Assert.AreEqual(2, solution.Count);
     }
+
+    [TestMethod]
+    public void TestCompareProducts()
+    {
+      // the largest coordinate difference, and two products above 2^64 that differ only in the low word
+      const long m = 2 * InternalClipper.MaxCoord;
+      const long p = (1L << 32) + 1;
+      const long q = 1L << 32;
+
+      Assert.AreEqual(-1L, InternalClipper.MultiplyInt64(-1, 1).hi);
+      Assert.AreEqual(ulong.MaxValue, InternalClipper.MultiplyInt64(-1, 1).lo);
+      Assert.AreEqual(1L << 62, InternalClipper.MultiplyInt64(long.MinValue, long.MinValue).hi);
+      Assert.AreEqual(0UL, InternalClipper.MultiplyInt64(long.MinValue, long.MinValue).lo);
+      Assert.AreEqual(-(1L << 62), InternalClipper.MultiplyInt64(long.MinValue, long.MaxValue).hi);
+      Assert.AreEqual(1UL << 63, InternalClipper.MultiplyInt64(long.MinValue, long.MaxValue).lo);
+      Assert.AreEqual(InternalClipper.MultiplyInt64(m, -m).hi, InternalClipper.MultiplyInt64(-m, m).hi);
+      Assert.AreEqual(InternalClipper.MultiplyInt64(m, -m).lo, InternalClipper.MultiplyInt64(-m, m).lo);
+
+      Assert.AreEqual(0, InternalClipper.CompareProducts(0, m, 0, -m));
+      Assert.AreEqual(1, InternalClipper.CompareProducts(0, 0, -1, 1));
+      Assert.AreEqual(-1, InternalClipper.CompareProducts(0, 0, 1, 1));
+      Assert.AreEqual(0, InternalClipper.CompareProducts(m, m, m, m));
+      Assert.AreEqual(0, InternalClipper.CompareProducts(-m, -m, m, m));
+      Assert.AreEqual(0, InternalClipper.CompareProducts(-m, m, m, -m));
+      Assert.AreEqual(1, InternalClipper.CompareProducts(m, m, m, m - 1));
+      Assert.AreEqual(-1, InternalClipper.CompareProducts(-m, m, m, 1 - m));
+      Assert.AreEqual(-1, InternalClipper.CompareProducts(-m, m, m, m));
+      Assert.AreEqual(1, InternalClipper.CompareProducts(m, m, -m, m));
+      Assert.AreEqual(1, InternalClipper.CompareProducts(p, p, q, q + 2));
+      Assert.AreEqual(-1, InternalClipper.CompareProducts(q, q + 2, p, p));
+      Assert.AreEqual(-1, InternalClipper.CompareProducts(-p, p, -q, q + 2));
+      Assert.AreEqual(1, InternalClipper.CompareProducts(-p, -p, q, -q - 2));
+      Assert.IsTrue(InternalClipper.ProductsAreEqual(-p, p, p, -p));
+      Assert.IsFalse(InternalClipper.ProductsAreEqual(p, p, q, q + 2));
+    }
   }
 }
