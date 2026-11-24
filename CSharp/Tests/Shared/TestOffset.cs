@@ -516,7 +516,7 @@ namespace Clipper2Lib.UnitTests
     [TestMethod]
     public void TestOffsets9() // (#733)
     {
-      // solution orientations should match subject orientations UNLESS
+      // solutions are positive whatever the subject's orientation, UNLESS
       // reverse_solution is set true in ClipperOffset's constructor
       // start subject's orientation positive ...
       Paths64 subject = Ps(P(100, 100, 200, 100, 200, 400, 100, 400));
@@ -529,24 +529,24 @@ namespace Clipper2Lib.UnitTests
       solution = Clipper.InflatePaths(subject, 50, JoinType.Miter, EndType.Polygon);
       Assert.AreEqual(1, solution.Count);
       Assert.IsTrue(Math.Abs(Clipper.Area(solution[0])) > Math.Abs(Clipper.Area(subject[0])));
-      Assert.IsFalse(Clipper.IsPositive(solution[0]));
+      Assert.IsTrue(Clipper.IsPositive(solution[0]));
       ClipperOffset co = new(2, 0, false, true); // last param. reverses solution
       co.AddPaths(subject, JoinType.Miter, EndType.Polygon);
       co.Execute(50, solution);
       Assert.AreEqual(1, solution.Count);
       Assert.IsTrue(Math.Abs(Clipper.Area(solution[0])) > Math.Abs(Clipper.Area(subject[0])));
-      Assert.IsTrue(Clipper.IsPositive(solution[0]));
+      Assert.IsFalse(Clipper.IsPositive(solution[0]));
       // add a hole (ie has reverse orientation to outer path)
       subject.Add(P(130, 130, 170, 130, 170, 370, 130, 370));
       solution = Clipper.InflatePaths(subject, 30, JoinType.Miter, EndType.Polygon);
       Assert.AreEqual(1, solution.Count);
-      Assert.IsFalse(Clipper.IsPositive(solution[0]));
+      Assert.IsTrue(Clipper.IsPositive(solution[0]));
       co.Clear(); // should still reverse solution orientation
       co.AddPaths(subject, JoinType.Miter, EndType.Polygon);
       co.Execute(30, solution);
       Assert.AreEqual(1, solution.Count);
       Assert.IsTrue(Math.Abs(Clipper.Area(solution[0])) > Math.Abs(Clipper.Area(subject[0])));
-      Assert.IsTrue(Clipper.IsPositive(solution[0]));
+      Assert.IsFalse(Clipper.IsPositive(solution[0]));
       solution = Clipper.InflatePaths(subject, -15, JoinType.Miter, EndType.Polygon);
       Assert.AreEqual(0, solution.Count);
     }
@@ -601,11 +601,11 @@ namespace Clipper2Lib.UnitTests
       Paths64 solution1 = Clipper.InflatePaths(subjects1, delta, joinType, endType);
       double area1 = Math.Abs(Clipper.Area(solution1));
       Assert.AreEqual(122, area1);
-      // adding this single-point path should not really change the solution
+      // adding this single-point path must not change how the triangle is offset
       Paths64 subjects2 = Ps(subject1, P(0, 20));
       Paths64 solution2 = Clipper.InflatePaths(subjects2, delta, joinType, endType);
       double area2 = Math.Abs(Clipper.Area(solution2));
-      Assert.AreEqual(122, area2);
+      Assert.AreEqual(122 + 16, area2); // the point becomes a separate 4x4 square
     }
 
     [TestMethod]
@@ -623,7 +623,7 @@ namespace Clipper2Lib.UnitTests
     [TestMethod]
     public void TestOffsetsDegenerateGroupKeepsDeltaSign()
     {
-      // a polygon group without a closed path is always inflated, but later groups must still shrink
+      // a polygon group without a closed path must not change the delta of later groups
       Path64 line = P(0, 500, 100, 500);
       Path64 square = P(0, 0, 100, 0, 100, 100, 0, 100);
 
@@ -699,14 +699,118 @@ namespace Clipper2Lib.UnitTests
     [TestMethod]
     public void TestOffsetsEmptyGroupOrientation()
     {
-      // an empty group has no orientation and must not decide the orientation of the solution
+      // an empty group in front of a clockwise polygon must not empty the solution
       Path64 clockwiseSquare = P(0, 0, 0, 100, 100, 100, 100, 0);
       ClipperOffset offset = new();
       offset.AddPath(new Path64(), JoinType.Miter, EndType.Polygon);
       offset.AddPath(clockwiseSquare, JoinType.Miter, EndType.Polygon);
       Paths64 solution = new();
       offset.Execute(10, solution);
-      Assert.AreEqual(-14400, Clipper.Area(solution));
+      Assert.AreEqual(14400, Clipper.Area(solution));
+    }
+
+    [TestMethod]
+    public void TestOffsetsOpenPathBesideClockwisePolygon()
+    {
+      // every group's outers are wound positively, so an open path is kept beside a clockwise polygon
+      ClipperOffset offset = new();
+      offset.AddPath(P(0, 0, 0, 100, 100, 100, 100, 0), JoinType.Miter, EndType.Polygon);
+      offset.AddPath(P(0, 500, 100, 500), JoinType.Miter, EndType.Butt);
+      Paths64 solution = new();
+      offset.Execute(10, solution);
+      Assert.AreEqual(120 * 120 + 100 * 20, Clipper.Area(solution));
+    }
+
+    [TestMethod]
+    public void TestOffsetsReversedGroupSinglePoint()
+    {
+      // a clockwise group must offset its points exactly as a counter-clockwise group does
+      Path64 square = P(0, 0, 100, 0, 100, 100, 0, 100);
+      Path64 clockwiseSquare = P(0, 0, 0, 100, 100, 100, 100, 0);
+      Path64 point = P(500, 500);
+      foreach (double delta in new[] { 10.0, -10.0 })
+      {
+        Paths64 expected = Clipper.InflatePaths(Ps(square, point), delta, JoinType.Miter, EndType.Polygon);
+        Paths64 solution = Clipper.InflatePaths(Ps(clockwiseSquare, point), delta, JoinType.Miter, EndType.Polygon);
+        Assert.AreEqual(expected.Count, solution.Count);
+        Assert.AreEqual(Clipper.Area(expected), Clipper.Area(solution));
+      }
+    }
+
+    [TestMethod]
+    public void TestOffsetsDegeneratePathsFollowDeltaSign()
+    {
+      // points and lines have no area, so a positive delta grows them and a negative one erodes them away
+      Path64 point = P(500, 500);
+      Path64 line = P(500, 500, 600, 500);
+      Path64 square = P(0, 0, 100, 0, 100, 100, 0, 100);
+      Path64 innerLine = P(30, 50, 70, 50);
+
+      Assert.AreEqual(400, Clipper.Area(Clipper.InflatePaths(Ps(point), 10, JoinType.Miter, EndType.Polygon)));
+      Assert.AreEqual(2400, Clipper.Area(Clipper.InflatePaths(Ps(line), 10, JoinType.Miter, EndType.Polygon)));
+      Assert.AreEqual(0, Clipper.InflatePaths(Ps(point), -10, JoinType.Miter, EndType.Polygon).Count);
+      Assert.AreEqual(0, Clipper.InflatePaths(Ps(line), -10, JoinType.Miter, EndType.Polygon).Count);
+      Assert.AreEqual(0, Clipper.InflatePaths(PsD(PD(5.0, 5.0)), -1, JoinType.Miter, EndType.Polygon).Count);
+
+      // open paths are offset by their width, whatever the sign
+      Assert.AreEqual(400, Clipper.Area(Clipper.InflatePaths(Ps(point), -10, JoinType.Miter, EndType.Square)));
+      Assert.AreEqual(2400, Clipper.Area(Clipper.InflatePaths(Ps(line), -10, JoinType.Miter, EndType.Square)));
+
+      // a bow-tie has no net area but is not flat, so it keeps growing as before
+      Path64 bowTie = P(0, 0, 100, 100, 0, 100, 100, 0);
+      Assert.AreEqual(5750, Clipper.Area(Clipper.InflatePaths(Ps(bowTie), -10, JoinType.Miter, EndType.Polygon)));
+      Assert.AreEqual(Clipper.Area(Clipper.InflatePaths(Ps(square), -10, JoinType.Miter, EndType.Polygon)),
+        Clipper.Area(Clipper.InflatePaths(Ps(square, innerLine), -10, JoinType.Miter, EndType.Polygon)));
+
+      // this hole's area rounds to zero in floating point, but it is not flat and must survive
+      Path64 outer = P(-100, 999999900, 10000101, 999999900, 10000101, 1010000100, -100, 1010000100);
+      Path64 hole = P(10000001, 1010000000, 10000000, 1009999999, 0, 1000000000);
+      Assert.AreEqual(2, Clipper.InflatePaths(Ps(outer, hole), -10, JoinType.Miter, EndType.Polygon).Count);
+    }
+
+    [TestMethod]
+    public void TestOffsetsDegeneratePathCallbackKeepsGrowth()
+    {
+      // the line grows at one end and erodes at the other, and its eroded end must not cut into the square
+      Path64 line = P(0, 0, 100, 0);
+      Path64 square = P(-50, -50, 150, -50, 150, 50, -50, 50);
+      ClipperOffset.DeltaCallback64 deltaCb = (path, norms, currIdx, prevIdx) =>
+        path.Count != 2 ? 0.0 : (currIdx == 0) ? -20.0 : 10.0;
+      foreach (JoinType joinType in new[] { JoinType.Miter, JoinType.Square, JoinType.Bevel, JoinType.Round })
+      {
+        ClipperOffset co = new();
+        co.AddPaths(Ps(square, line), joinType, EndType.Polygon);
+        Paths64 solution = new();
+        co.Execute(deltaCb, solution);
+        Assert.AreEqual(Clipper.Area(square), Clipper.Area(solution), joinType.ToString());
+
+        // alone, the grown end survives
+        co.Clear();
+        co.AddPath(line, joinType, EndType.Polygon);
+        co.Execute(deltaCb, solution);
+        Assert.IsTrue(Clipper.Area(solution) > 0, joinType.ToString());
+      }
+    }
+
+    [TestMethod]
+    public void TestOffsetsInsignificantDeltaDropsOpenPaths()
+    {
+      // an open path offset by less than half a unit has no width, so it must not be closed into a polygon
+      Path64 openPath = P(200, 0, 300, 0, 300, 100);
+      Path64 square = P(0, 0, 100, 0, 100, 100, 0, 100);
+      foreach (EndType endType in new[] { EndType.Joined, EndType.Butt, EndType.Square, EndType.Round })
+      {
+        Assert.AreEqual(0, Clipper.InflatePaths(Ps(openPath), 0.3, JoinType.Miter, endType).Count);
+        Assert.AreEqual(0, Clipper.InflatePaths(Ps(openPath), 0, JoinType.Miter, endType).Count);
+        Assert.AreEqual(0, Clipper.InflatePaths(PsD(PD(2, 0, 3, 0, 3, 1)), 0, JoinType.Miter, endType).Count);
+
+        ClipperOffset co = new();
+        co.AddPath(square, JoinType.Miter, EndType.Polygon);
+        co.AddPath(openPath, JoinType.Miter, endType);
+        Paths64 solution = new();
+        co.Execute(0.3, solution);
+        Assert.AreEqual(Exact(Clipper.InflatePaths(Ps(square), 0.3, JoinType.Miter, EndType.Polygon)), Exact(solution));
+      }
     }
   }
 }

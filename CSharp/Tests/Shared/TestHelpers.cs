@@ -24,6 +24,25 @@ namespace Clipper2Lib.UnitTests
 
     public static bool IsInList(int num, params int[] list) => Array.IndexOf(list, num) >= 0;
 
+    // exact text of paths, for equality like C++ operator== (Z included in the USINGZ build)
+    public static string Exact(Paths64 paths)
+    {
+      System.Text.StringBuilder sb = new();
+      foreach (Path64 p in paths)
+      {
+        foreach (Point64 pt in p)
+        {
+          sb.Append(pt.X).Append(',').Append(pt.Y);
+#if USINGZ
+          sb.Append(',').Append(pt.Z);
+#endif
+          sb.Append(' ');
+        }
+        sb.Append('|');
+      }
+      return sb.ToString();
+    }
+
     public static double Distance(PointD a, PointD b) =>
       Math.Sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
 

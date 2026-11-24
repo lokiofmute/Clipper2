@@ -7,6 +7,7 @@
 * License   :  https://www.boost.org/LICENSE_1_0.txt                           *
 *******************************************************************************/
 
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -38,8 +39,14 @@ namespace Clipper2Lib
       internal Paths64 inPaths;
       internal JoinType joinType;
       internal EndType endType;
-      internal bool pathsReversed;
-      internal int lowestPathIdx;
+      internal bool pathsReversed; // the group's outers are wound negatively
+      // a path's area, exactly, as its sign and twice its magnitude (polygon groups only)
+      internal readonly List<ExactArea> areas = new List<ExactArea>();
+      internal int outerIdx; // the largest closed path
+      internal int outerSign; // sign of the largest closed path's area, 0 if none
+      internal bool[]? isStray; // holes no outer encloses, null if there are none
+
+      internal bool IsStray(int pathIdx) => isStray != null && isStray[pathIdx];
 
       public Group(Paths64 paths, JoinType joinType, EndType endType = EndType.Polygon)
       {
@@ -53,21 +60,90 @@ namespace Clipper2Lib
         // the offset code assumes every path has at least one vertex
         inPaths.RemoveAll(p => p.Count == 0);
 
-        if (endType == EndType.Polygon)
+        if (endType != EndType.Polygon) return;
+
+        foreach (Path64 p in inPaths)
+          areas.Add(new ExactArea(p));
+
+        // sizes compare exactly, so paths of nearly equal size rank the same however they're
+        // wound. The first path wins a tie.
+        UInt128 largest = 0;
+        for (int i = 0; i < areas.Count; ++i)
         {
-          bool isNegArea;
-          GetLowestPathInfo(inPaths, out lowestPathIdx, out isNegArea);
-          // the lowermost path must be an outer path, so if its orientation is negative,
-          // then flag that the whole group is 'reversed' (will negate delta etc.)
-          // as this is much more efficient than reversing every path.
-          pathsReversed = (lowestPathIdx >= 0) && isNegArea;
+          if (areas[i].twiceMagnitude > largest)
+          {
+            largest = areas[i].twiceMagnitude;
+            outerSign = areas[i].sign;
+            outerIdx = i;
+          }
+        }
+      }
+    }
+
+    internal readonly struct ExactArea
+    {
+      public readonly int sign;
+      public readonly UInt128 twiceMagnitude;
+
+      public ExactArea(Path64 path)
+      {
+        // the shoelace sum may wrap around on the way, but it ends exact whenever twice the area
+        // fits in 127 bits, as it does within Clipper's coordinate range unless the path winds
+        // around often
+        Int128 sum = 0;
+        for (int i = 0, j = path.Count - 1; i < path.Count; j = i++)
+        {
+          sum += (Int128) path[j].X * path[i].Y;
+          sum -= (Int128) path[i].X * path[j].Y;
+        }
+        if (sum < 0)
+        {
+          sign = -1;
+          twiceMagnitude = (UInt128) (-sum);
         }
         else
         {
-          lowestPathIdx = -1;
-          pathsReversed = false;
+          sign = sum > 0 ? 1 : 0;
+          twiceMagnitude = (UInt128) sum;
         }
       }
+    }
+
+    // true when path lies inside a container, judged by the first of its vertices that locate
+    // doesn't put on the container's edge. A path touching it at every vertex counts as inside.
+    private static bool IsInside(Path64 path, Func<Point64, PointInPolygonResult> locate)
+    {
+      foreach (Point64 pt in path)
+      {
+        PointInPolygonResult pip = locate(pt);
+        if (pip != PointInPolygonResult.IsOn) return pip == PointInPolygonResult.IsInside;
+      }
+      return true;
+    }
+
+    // true when any vertex of path is inside a container, or all of them are on its edge
+    private static bool HasVertexInside(Path64 path, Func<Point64, PointInPolygonResult> locate)
+    {
+      bool allOn = true;
+      foreach (Point64 pt in path)
+      {
+        PointInPolygonResult pip = locate(pt);
+        if (pip == PointInPolygonResult.IsInside) return true;
+        if (pip == PointInPolygonResult.IsOutside) allOn = false;
+      }
+      return allOn;
+    }
+
+    // true when every vertex lies on one line, so the path encloses no area
+    private static bool IsFlat(Path64 path)
+    {
+      int i = 1;
+      while (i < path.Count && path[i] == path[0]) i++;
+      if (i == path.Count) return true;
+      Point64 pt1 = path[i];
+      for (int j = i + 1; j < path.Count; j++)
+        if (InternalClipper.CrossProductSign(path[0], pt1, path[j]) != 0) return false;
+      return true;
     }
 
     private const double Tolerance = 1.0E-12;
@@ -160,25 +236,194 @@ namespace Clipper2Lib
       return result;
     }
 
-    internal bool CheckPathsReversed()
+    private readonly struct PathRef
     {
-      // nb: this assumes there's consistency in orientation between groups,
-      // and groups without a valid closed path have no orientation to offer
-      foreach (Group g in _groupList)
-        if (g.lowestPathIdx >= 0) return g.pathsReversed;
-      return false;
+      public readonly UInt128 size;
+      public readonly int groupIdx;
+      public readonly int pathIdx;
+      public PathRef(UInt128 size, int groupIdx, int pathIdx)
+      {
+        this.size = size;
+        this.groupIdx = groupIdx;
+        this.pathIdx = pathIdx;
+      }
+    }
+
+    private void SetGroupOrientations()
+    {
+      // a group's outers share the orientation of its largest closed path, which a hole touching
+      // its outer or a stray sliver left by clipping can't outweigh. Flagging groups as 'reversed'
+      // (negating delta etc.) is much more efficient than reversing every path.
+      List<PathRef> paths = new List<PathRef>();
+      List<Rect64> bounds = new List<Rect64>();
+      List<int> groupEnds = new List<int>(); // where each group's paths end in paths
+      int[] outerRefs = new int[_groupList.Count]; // each group's largest path in paths
+      bool hasCcw = false, hasCw = false, hasHoles = false;
+
+      for (int i = 0; i < _groupList.Count; ++i)
+      {
+        Group g = _groupList[i];
+        g.pathsReversed = g.outerSign < 0;
+        g.isStray = null;
+        hasCcw = hasCcw || (g.outerSign > 0);
+        hasCw = hasCw || (g.outerSign < 0);
+
+        for (int j = 0; j < g.areas.Count; ++j)
+        {
+          if (g.areas[j].sign == 0) continue;
+          hasHoles = hasHoles || (g.areas[j].sign != g.outerSign);
+          if (j == g.outerIdx) outerRefs[i] = paths.Count;
+          paths.Add(new PathRef(g.areas[j].twiceMagnitude, i, j));
+          bounds.Add(Clipper.GetBounds(g.inPaths[j]));
+        }
+        groupEnds.Add(paths.Count);
+      }
+
+      // only a group wound against another can hold that group's holes
+      bool isMixed = hasCcw && hasCw;
+      if (!isMixed && !hasHoles) return;
+
+      // A group wound against another holds that group's holes when its largest path lies inside one
+      // of that group's outers, and the innermost enclosing path decides, so a group inside another
+      // group's hole stays an island. A hole that no outer at least as large encloses is stray and
+      // contributes nothing, since offsetting it alone would leave the loops its concave joins add.
+      // Each decision depends only on paths at least as large, so settling from the largest path down,
+      // with a group's own largest path first among equals, settles everything in one pass whatever
+      // the AddPaths order. Without mixed orientations no group turns into holes, so any order will do.
+      int[] order = new int[paths.Count];
+      for (int i = 0; i < order.Length; i++) order[i] = i;
+      if (isMixed)
+      {
+        // stable, like the C++ std::stable_sort
+        Array.Sort(order, (a, b) =>
+        {
+          if (paths[a].size != paths[b].size) return paths[a].size > paths[b].size ? -1 : 1;
+          bool aOuter = paths[a].pathIdx == _groupList[paths[a].groupIdx].outerIdx;
+          bool bOuter = paths[b].pathIdx == _groupList[paths[b].groupIdx].outerIdx;
+          if (aOuter != bOuter) return aOuter ? -1 : 1;
+          return a.CompareTo(b);
+        });
+      }
+
+      Path64 PathOf(int i) => _groupList[paths[i].groupIdx].inPaths[paths[i].pathIdx];
+      int SignOf(int i) => _groupList[paths[i].groupIdx].areas[paths[i].pathIdx].sign;
+      bool IsOuter(int i) => (SignOf(i) < 0) == _groupList[paths[i].groupIdx].pathsReversed;
+
+      // the outers are active, so a hole looking for one skips the holes around it. Holes inside
+      // their own group's outer don't need the tree at all.
+      BoundsTree? tree = null;
+      BoundsTree GetTree()
+      {
+        if (tree != null) return tree;
+        tree = new BoundsTree(bounds);
+        for (int i = 0; i < paths.Count; ++i)
+          tree.SetActive(i, IsOuter(i));
+        return tree;
+      }
+
+      PolygonLocator locator = new PolygonLocator(paths.Count);
+      Func<Point64, PointInPolygonResult> LocateIn(int i) => pt => locator.Locate(pt, PathOf(i), i);
+      List<int> enclosers = new List<int>();
+
+      foreach (int k in order)
+      {
+        int groupIdx = paths[k].groupIdx;
+        Group g = _groupList[groupIdx];
+        Path64 path = PathOf(k);
+        Rect64 pathBounds = bounds[k];
+
+        if (paths[k].pathIdx == g.outerIdx)
+        {
+          if (!isMixed) continue;
+          enclosers.Clear();
+          GetTree().Query(r => r.Contains(pathBounds), i =>
+          {
+            if (paths[i].groupIdx != groupIdx && paths[i].size > paths[k].size &&
+              !_groupList[paths[i].groupIdx].IsStray(paths[i].pathIdx))
+              enclosers.Add(i);
+          });
+
+          // a heap, since only the smallest few enclosers are usually needed
+          PriorityQueue<int, UInt128> heap = new PriorityQueue<int, UInt128>();
+          foreach (int i in enclosers) heap.Enqueue(i, paths[i].size);
+          int innermost = paths.Count;
+          bool isHole = false;
+          while (heap.Count > 0)
+          {
+            int i = heap.Dequeue();
+            if (innermost < paths.Count && paths[i].size > paths[innermost].size) break;
+            if (!IsInside(path, LocateIn(i))) continue;
+            innermost = i;
+            // the enclosing path must be one of its group's outers, wound against this group
+            if (IsOuter(i) && SignOf(i) != g.outerSign) isHole = true;
+          }
+          if (!isHole) continue;
+
+          g.pathsReversed = !g.pathsReversed;
+          for (int i = groupIdx > 0 ? groupEnds[groupIdx - 1] : 0; i < groupEnds[groupIdx]; ++i)
+            GetTree().SetActive(i, IsOuter(i));
+          continue;
+        }
+
+        if (IsOuter(k)) continue;
+
+        // a hole with a vertex inside an outer counts as enclosed, so one poking out still cuts it
+        int ownOuter = outerRefs[groupIdx];
+        bool isEnclosed = IsOuter(ownOuter) && HasVertexInside(path, LocateIn(ownOuter));
+        if (!isEnclosed)
+        {
+          GetTree().Query(r => !isEnclosed && r.Intersects(pathBounds), i =>
+          {
+            if (paths[i].size >= paths[k].size) isEnclosed = HasVertexInside(path, LocateIn(i));
+          }, true);
+        }
+        if (isEnclosed) continue;
+
+        g.isStray ??= new bool[g.inPaths.Count];
+        g.isStray[paths[k].pathIdx] = true;
+      }
+    }
+
+    private void InitClipper(Clipper64 c)
+    {
+      c.PreserveCollinear = PreserveCollinear;
+#if USINGZ
+      c.ZCallback = ZCB;
+#endif
+    }
+
+    private void KeepGrownRegions()
+    {
+      // growth is always wound positively, so a positive union removes the eroded regions
+      Clipper64 c = new Clipper64();
+      InitClipper(c);
+      c.AddSubject(new Paths64 { _solution[^1] });
+      _solution.RemoveAt(_solution.Count - 1);
+      Paths64 grown = new Paths64();
+      c.Execute(ClipType.Union, FillRule.Positive, grown);
+      _solution.AddRange(grown);
     }
 
     private void ExecuteInternal(double delta)
     {
       if (_groupList.Count == 0) return;
       _solution.EnsureCapacity(CalcSolutionCapacity());
+      SetGroupOrientations();
 
       if (Math.Abs(delta) < 0.5) // ie: offset is insignificant
       {
         foreach (Group group in _groupList)
-          foreach (Path64 path in group.inPaths)
-            _solution.Add(path);
+        {
+          // an open path is only as wide as its delta, so an insignificant delta leaves nothing
+          if (group.endType != EndType.Polygon) continue;
+          for (int i = 0; i < group.inPaths.Count; ++i)
+          {
+            if (group.IsStray(i)) continue;
+            Path64 p = new Path64(group.inPaths[i]);
+            if (group.pathsReversed) p.Reverse();
+            _solution.Add(p);
+          }
+        }
       }
       else
       {
@@ -191,22 +436,16 @@ namespace Clipper2Lib
 
       if (_solution.Count == 0) return;
 
-      bool pathsReversed = CheckPathsReversed();
-      FillRule fillRule = pathsReversed ? FillRule.Negative : FillRule.Positive;
-
       // clean up self-intersections ...
       Clipper64 c = new Clipper64();
-      c.PreserveCollinear = PreserveCollinear;
-      // the solution should retain the orientation of the input
-      c.ReverseSolution = ReverseSolution != pathsReversed;
-#if USINGZ
-      c.ZCallback = ZCB;
-#endif
+      InitClipper(c);
+      c.ReverseSolution = ReverseSolution;
       c.AddSubject(_solution);
+      // outers are wound positively, whatever the orientation of the input
       if (_solutionTree != null)
-        c.Execute(ClipType.Union, fillRule, _solutionTree);
+        c.Execute(ClipType.Union, FillRule.Positive, _solutionTree);
       else
-        c.Execute(ClipType.Union, fillRule, _solution);
+        c.Execute(ClipType.Union, FillRule.Positive, _solution);
     }
 
     public void Execute(double delta, Paths64 solution)
@@ -252,31 +491,6 @@ namespace Clipper2Lib
       Execute(1.0, solution);
     }    
     
-    internal static void GetLowestPathInfo(Paths64 paths, out int idx, out bool isNegArea)
-    {
-      idx = -1;
-      isNegArea = false;
-      Point64 botPt = new Point64(long.MaxValue, long.MinValue);
-      for (int i = 0; i < paths.Count; ++i)
-      {
-        double a = double.MaxValue;
-        foreach (Point64 pt in paths[i])
-		    {
-          if ((pt.Y < botPt.Y) ||
-            ((pt.Y == botPt.Y) && (pt.X >= botPt.X))) continue;
-          if (a == double.MaxValue)
-          {
-            a = Clipper.Area(paths[i]);
-            if (a == 0) break; // invalid closed path so break from inner loop
-            isNegArea = a < 0;
-          }
-          idx = i;
-          botPt.X = pt.X;
-          botPt.Y = pt.Y;
-        }
-      }
-    }
-
   [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static PointD TranslatePoint(PointD pt, double dx, double dy)
     {
@@ -582,6 +796,8 @@ namespace Clipper2Lib
       int cnt = path.Count;
       for (int j = 0, k = cnt - 1; j < cnt; k = j, j++)
         OffsetPoint(group, path, j, k);
+      // a reversed group's outers come out negative, but the solution's outers are always positive
+      if (group.pathsReversed) pathOut.Reverse();
       _solution.Add(pathOut);
     }
 
@@ -662,7 +878,7 @@ namespace Clipper2Lib
       {
         // a straight path (2 points) can now also be 'polygon' offset
         // where the ends will be treated as (180 deg.) joins
-        double delta = (group.lowestPathIdx >= 0) ? _delta : Math.Abs(_delta);
+        double delta = (group.outerSign != 0) ? _delta : Math.Abs(_delta);
         _groupDelta = (group.pathsReversed) ? -delta : delta;
       }
       else
@@ -674,22 +890,26 @@ namespace Clipper2Lib
       if (group.joinType == JoinType.Round || group.endType == EndType.Round)
         SetArcSteps(_groupDelta);
 
-      foreach (Path64 p in group.inPaths)
+      for (int pathIdx = 0; pathIdx < group.inPaths.Count; pathIdx++)
       {
+        if (group.IsStray(pathIdx)) continue;
+        Path64 p = group.inPaths[pathIdx];
         int cnt = p.Count;
         pathOut = new Path64();
         BuildNormals(p);
 
         if (cnt == 1) // single point
         {
+          double pointDelta = (group.endType == EndType.Polygon) ? _delta : Math.Abs(_delta);
           if (DeltaCallback != null)
           {
-            _groupDelta = DeltaCallback(p, _normals, 0, 0);
-            if (group.pathsReversed) _groupDelta = -_groupDelta;
+            pointDelta = DeltaCallback(p, _normals, 0, 0);
+            _groupDelta = group.pathsReversed ? -pointDelta : pointDelta;
             absDelta = Math.Abs(_groupDelta);
           }
 
-          if (_groupDelta < 1) continue;
+          // a point can only grow, so the caller's delta decides and not the group's orientation
+          if (pointDelta < 1) continue;
           Point64 pt = p[0];
           // single vertex so build a circle or square ...
           if (group.joinType == JoinType.Round)
@@ -720,7 +940,15 @@ namespace Clipper2Lib
         if (cnt == 2 && endType == EndType.Joined)
           endType = (group.joinType == JoinType.Round) ? EndType.Round : EndType.Square;
 
-        if (endType == EndType.Polygon) OffsetPolygon(group, p);
+        if (endType == EndType.Polygon)
+        {
+          // a path without area can only grow, so a negative delta erodes it to nothing
+          bool flat = IsFlat(p);
+          if (flat && DeltaCallback == null && _delta < 0) continue;
+          OffsetPolygon(group, p);
+          // a callback can grow some vertices and erode others, so keep only what grew
+          if (flat && DeltaCallback != null) KeepGrownRegions();
+        }
         else if (endType == EndType.Joined) OffsetOpenJoined(group, p);
         else OffsetOpenPath(group, p, endType);
       }
