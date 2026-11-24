@@ -7,6 +7,7 @@ using TriangulationBench;
 
 // usage:
 //   TriangulationBench quick [filter] [--seconds s]   median ms and allocations per case, both modes
+//   TriangulationBench verify [filter]                  exact checks of every case (coverage, Delaunay)
 //   TriangulationBench profile <case> <true|false> <seconds>   a hot loop for dotnet-trace
 //   TriangulationBench [BenchmarkDotNet args]          e.g. --filter *  (see README.md)
 CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
@@ -20,6 +21,10 @@ if (args.Length > 0 && args[0] == "quick")
   if (si >= 0) seconds = double.Parse(args[si + 1], CultureInfo.InvariantCulture);
   Quick.Run(filter, seconds);
   return;
+}
+if (args.Length > 0 && args[0] == "verify")
+{
+  Environment.Exit(Verify.Run(args.Length > 1 ? args[1] : null));
 }
 if (args.Length > 0 && args[0] == "profile")
 {

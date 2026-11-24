@@ -6,6 +6,7 @@ Benchmarks for `Clipper.Triangulate`. It isn't part of `Clipper2.sln` or the pac
 cd CSharp/Benchmarks/TriangulationBench
 dotnet run -c Release -- quick [nameFilter] [--seconds 2]      # median and min ms, allocations, both modes
 dotnet run -c Release -- --filter '*' --join                    # BenchmarkDotNet, with [MemoryDiagnoser]
+dotnet run -c Release -- verify [nameFilter]                    # exact checks of every case
 dotnet run -c Release -- profile plate-500-holes true 20        # a hot loop to attach dotnet-trace to
 ```
 
@@ -48,3 +49,7 @@ dotnet run -c Release -- profile plate-500-holes true 20        # a hot loop to 
 | nodeflow-plate | 187 | 0.18 | 0.41 | 466 KB |
 
 Profiles (dotnet-trace, sampled): perforated spends 77% in hole bridging (`FindBridge`, 58% in `SegmentBlocked`); slice-Plate with Delaunay 78% in `Legalize`; dense-circle 90% in `IsEar`; star-10k 59% in `IsEar` and 30% in the up-front Union (the clipping engine, out of scope).
+
+## Verify
+
+`verify [filter]` runs every case through the `Paths64` overload in both modes and checks the result exactly, as the fuzz harness does: success, positive triangles, exact coverage (the triangles' edges minus the region's cancel as chains), and with Delaunay, every shared edge locally Delaunay (BigInteger in-circle). It exits with 1 if any case fails. The fuzz inputs are small, so this is the check for large rings.

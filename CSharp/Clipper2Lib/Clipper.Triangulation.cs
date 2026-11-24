@@ -1030,13 +1030,13 @@ namespace Clipper2Lib
 
     private static void Legalize(List<Point64[]> triangles)
     {
-      // vertices by position, triangles as counter-clockwise index triples
-      Dictionary<(long, long), int> index = new Dictionary<(long, long), int>();
-      List<Point64> pts = new List<Point64>();
-      int[][] tris = new int[triangles.Count][];
-      for (int t = 0; t < triangles.Count; t++)
-      {
-        tris[t] = new int[3];
+      // vertices by position, triangles as counter-clockwise index triples: half-edge h of
+      // triangle h / 3 runs from tri[h] to tri[Next(h)]
+      int count = triangles.Count;
+      Dictionary<(long, long), int> index = new Dictionary<(long, long), int>(count + 2);
+      List<Point64> pts = new List<Point64>(count + 2);
+      int[] tri = new int[3 * count];
+      for (int t = 0; t < count; t++)
         for (int k = 0; k < 3; k++)
         {
           Point64 pt = triangles[t][k];
@@ -1046,59 +1046,74 @@ namespace Clipper2Lib
             pts.Add(pt);
             index.Add((pt.X, pt.Y), i);
           }
-          tris[t][k] = i;
+          tri[3 * t + k] = i;
         }
+
+      // twin[h]: the half-edge running the other way along h's edge, or -1 on the boundary.
+      // An edge used twice in one direction (where rings touch) has no twin either, so it is
+      // left alone.
+      long n = pts.Count;
+      Dictionary<long, int> directed = new Dictionary<long, int>(3 * count);
+      for (int h = 0; h < 3 * count; h++)
+      {
+        long key = tri[h] * n + tri[Next(h)];
+        directed[key] = directed.TryGetValue(key, out int other) && other != h ? -2 : h;
+      }
+      int[] twin = new int[3 * count];
+      HashSet<long> undirected = new HashSet<long>();
+      for (int h = 0; h < 3 * count; h++)
+      {
+        int u = tri[h], v = tri[Next(h)];
+        undirected.Add(Math.Min(u, v) * n + Math.Max(u, v));
+        twin[h] = directed[u * n + v] == h && directed.TryGetValue(v * n + u, out int r) && r >= 0 ? r : -1;
       }
 
-      // each directed edge to its triangle; an edge used twice in one direction (where rings
-      // touch) is left alone
-      Dictionary<(int, int), int> edges = new Dictionary<(int, int), int>();
-      HashSet<(int, int)> fixedEdges = new HashSet<(int, int)>();
-      for (int t = 0; t < tris.Length; t++)
-        for (int k = 0; k < 3; k++)
-        {
-          (int, int) e = (tris[t][k], tris[t][(k + 1) % 3]);
-          if (!edges.TryAdd(e, t)) fixedEdges.Add(e);
-        }
-
-      Stack<(int, int)> pending = new Stack<(int, int)>(edges.Keys);
-      long guard = 64L * tris.Length * tris.Length + 1024;
+      Stack<int> pending = new Stack<int>(3 * count);
+      for (int h = 3 * count - 1; h >= 0; h--) pending.Push(h);
+      long guard = 64L * count * count + 1024;
       while (pending.Count > 0 && guard-- > 0)
       {
-        (int u, int v) = pending.Pop();
-        if (fixedEdges.Contains((u, v)) || fixedEdges.Contains((v, u))) continue;
-        if (!edges.TryGetValue((u, v), out int t1) || !edges.TryGetValue((v, u), out int t2)) continue;
-        int w = Third(tris[t1], u, v), x = Third(tris[t2], v, u);
+        int e = pending.Pop(), f = twin[e];
+        if (f < 0) continue;
+        int ne = Next(e), pe = Prev(e), nf = Next(f), pf = Prev(f);
+        int u = tri[e], v = tri[ne], w = tri[pe], x = tri[pf];
 
         // (u, v, w) is counter-clockwise, so a positive sign means x is inside its circle
         if (InCircleSign(pts[u], pts[v], pts[w], pts[x]) <= 0) continue;
         // the new triangles must be proper (the quad must be convex)
         if (InternalClipper.CrossProductSign(pts[u], pts[x], pts[w]) <= 0 ||
             InternalClipper.CrossProductSign(pts[x], pts[v], pts[w]) <= 0) continue;
-        if (edges.ContainsKey((x, w)) || edges.ContainsKey((w, x))) continue;
+        if (undirected.Contains(Math.Min(x, w) * n + Math.Max(x, w))) continue;
 
-        foreach (int[] tri in new[] { tris[t1], tris[t2] })
-          for (int k = 0; k < 3; k++) edges.Remove((tri[k], tri[(k + 1) % 3]));
-        tris[t1] = new[] { u, x, w };
-        tris[t2] = new[] { x, v, w };
-        foreach (int t in new[] { t1, t2 })
-          for (int k = 0; k < 3; k++) edges[(tris[t][k], tris[t][(k + 1) % 3])] = t;
+        // (u, v, w) and (v, u, x) become (u, x, w) and (x, v, w)
+        undirected.Remove(Math.Min(u, v) * n + Math.Max(u, v));
+        undirected.Add(Math.Min(x, w) * n + Math.Max(x, w));
+        int a1 = twin[nf], a2 = twin[pf], b1 = twin[ne];
+        tri[ne] = x;
+        tri[f] = x; tri[nf] = v; tri[pf] = w;
+        Link(twin, e, a1);  // u -> x
+        Link(twin, ne, pf); // x -> w and w -> x
+        Link(twin, f, a2);  // x -> v
+        Link(twin, nf, b1); // v -> w
 
-        pending.Push((u, x));
-        pending.Push((x, v));
-        pending.Push((v, w));
-        pending.Push((w, u));
+        pending.Push(e);
+        pending.Push(f);
+        pending.Push(nf);
+        pending.Push(pe);
       }
 
-      for (int t = 0; t < tris.Length; t++)
-        triangles[t] = new[] { pts[tris[t][0]], pts[tris[t][1]], pts[tris[t][2]] };
+      for (int t = 0; t < count; t++)
+        triangles[t] = new[] { pts[tri[3 * t]], pts[tri[3 * t + 1]], pts[tri[3 * t + 2]] };
     }
 
-    private static int Third(int[] tri, int a, int b)
+    private static int Next(int h) => h % 3 == 2 ? h - 2 : h + 1;
+    private static int Prev(int h) => h % 3 == 0 ? h + 2 : h - 1;
+
+    // makes half-edges h and g (or the boundary, -1) each other's twin
+    private static void Link(int[] twin, int h, int g)
     {
-      for (int k = 0; k < 3; k++)
-        if (tri[k] != a && tri[k] != b) return tri[k];
-      return tri[0];
+      twin[h] = g;
+      if (g >= 0) twin[g] = h;
     }
 
     private const long InCircleInt128Limit = 1L << 30;
