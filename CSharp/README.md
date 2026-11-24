@@ -33,4 +33,12 @@ The package is `Clipper2` (assembly and namespace `Clipper2Lib`, strong-named wi
 
 ## Triangulation
 
-`Clipper.Triangulate` is maintained by this fork only (the C++ removed it upstream). Its Delaunay in-circle test is exact (Int128, with a BigInteger fallback for large coordinates), which fixes a hang in `Delaunay.ForceLegal` on near-cocircular points (Walrus NodeFlow N972).
+`Clipper.Triangulate` is maintained by this fork only (the C++ removed it upstream). The sweep it inherited from 2.0.0 returned overlapping triangles on many polygons with collinear vertices, and could flip Delaunay edges forever (Walrus NodeFlow N972), so it was replaced:
+
+1. The input is normalized with a `Union` (even-odd) into outers and holes, whatever their orientation. Paths that cross each other (beyond rounding) return `pathsIntersect`.
+2. Rings that touch are made to share vertices, and are split where they pass a point twice.
+3. Each outer is ear clipped with its holes bridged in, using exact (Int128) predicates.
+4. The triangles' areas must add up exactly to the region's area. If they don't, the result is `fail`, never wrong triangles.
+5. With `useDelaunay`, edges are flipped (Lawson) using an exact in-circle test (Int128, BigInteger for large coordinates), which always terminates.
+
+Tested on 20,000 random polygons, 10,000 random regions with holes and ~50,000 grid-aligned CAD-like regions (each result checked for exact coverage and local Delaunay edges). A handful of the grid regions, with holes touching their outer at several points in a row, return `fail`.

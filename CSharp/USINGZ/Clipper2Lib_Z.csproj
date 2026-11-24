@@ -34,7 +34,10 @@ Ports the fork's C++ engine changes; on the shared test data the output is byte-
 - engine: rounded intersections and stable sorts, edges leaving a shared vertex kept in order, clamped intersections kept inside the scanbeam, cyclic split recursion guard, exact 128-bit product comparison, faster scanline handling, a Y-stripe point-in-polygon index for PolyTree nesting, and fixes for long-standing C#/C++ differences
 - offsets: per-path state, empty paths ignored, Z kept on square joins, and output always wound positively (outers positive, holes negative; negative with ReverseSolution)
 - a clipper is reusable after Execute into a PolyTree, and after a Z callback throws
-- Triangulate: the Delaunay in-circle test is exact, so ForceLegal terminates (NodeFlow N972)</PackageReleaseNotes>
+- Z is never rounded through a double, so Z values above 2^53 survive offsets and ScalePath
+- Triangulate is rewritten: the input is normalized with a Union, then ear clipped with exact predicates
+  (holes, touching rings and collinear vertices included), and Delaunay uses exact edge flips that always
+  terminate (NodeFlow N972). It returns success only when the triangles cover the region exactly, otherwise fail.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>
