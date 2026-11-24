@@ -1,0 +1,2 @@
+# saved-Cad-test-005-0 decPlaces=6 delaunay=true  (a SketchDraw drawing saved in Cad_test_005.json (sketch 0 in the file); sketch tolerance 0.005656854249492381 mm; 1 paths, 6 points)
+0,0 20,0 20,10 10,10 10,20 0,20

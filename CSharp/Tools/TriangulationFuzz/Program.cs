@@ -91,12 +91,16 @@ static string? Check(Paths64 region, bool del)
     if (t.Count != 3) return "not a triangle";
     if (InternalClipper.CrossProductSign(t[0], t[1], t[2]) <= 0) return "triangle not positive";
   }
-  Paths64 covered = Clipper.Union(tris, FillRule.NonZero);
-  double xor = Clipper.Area(Clipper.Xor(covered, region, FillRule.EvenOdd));
+  // the region as Triangulate reads it: an EvenOdd union, collinear vertices kept
+  Clipper64 c = new() { PreserveCollinear = true };
+  c.AddSubject(region);
+  Paths64 rings = new();
+  c.Execute(ClipType.Union, FillRule.EvenOdd, rings);
   Int128 sum = 0; foreach (Path64 t in tris) sum += Twice(t);
-  Int128 regionArea = 0; foreach (Path64 p in Clipper.Union(region, FillRule.EvenOdd)) regionArea += Twice(p);
-  regionArea = Int128.Abs(regionArea);
-  if (xor != 0 || sum != regionArea) return $"coverage xor {xor} sum {sum} region {regionArea}";
+  Int128 regionArea = 0; foreach (Path64 p in rings) regionArea += Twice(p);
+  if (sum != Int128.Abs(regionArea)) return $"coverage sum {sum} region {Int128.Abs(regionArea)}";
+  string? chain = ChainMismatch(rings, regionArea < 0, tris);
+  if (chain != null) return "coverage " + chain;
   if (del)
   {
     Dictionary<(long, long, long, long), Point64> opp = new();
@@ -112,6 +116,52 @@ static string? Check(Paths64 region, bool del)
         else opp[(u.X, u.Y, v.X, v.Y)] = w;
       }
   }
+  return null;
+}
+
+// Exact coverage. As 1-chains, the triangles' directed edges minus the region's must cancel
+// once every edge is split at every vertex lying on it. Then at every point the triangles'
+// winding numbers add up to the region's (1 inside, 0 outside), and as every triangle is
+// positive, they cover the region exactly once and nothing else. (A Union and Xor of the
+// triangles can't decide this: the engine drops slivers under a unit wide, e.g. grid 92063.)
+static string? ChainMismatch(Paths64 rings, bool ringsNegative, Paths64 tris)
+{
+  List<(Point64 a, Point64 b, int w)> segs = new();
+  foreach (Path64 t in tris)
+    for (int i = 0; i < 3; i++) segs.Add((t[i], t[(i + 1) % 3], 1));
+  foreach (Path64 r in rings)
+    for (int i = 0; i < r.Count; i++) segs.Add((r[i], r[(i + 1) % r.Count], ringsNegative ? 1 : -1));
+  List<Point64> verts = segs.Select(s => s.a).Concat(segs.Select(s => s.b))
+    .DistinctBy(p => (p.X, p.Y)).OrderBy(p => p.X).ThenBy(p => p.Y).ToList();
+  Dictionary<(long, long, long, long), int> net = new();
+  List<Point64> on = new();
+  foreach ((Point64 a, Point64 b, int w) in segs)
+  {
+    if (a == b) continue;
+    long minX = Math.Min(a.X, b.X), maxX = Math.Max(a.X, b.X), minY = Math.Min(a.Y, b.Y), maxY = Math.Max(a.Y, b.Y);
+    int lo = 0, hi = verts.Count;
+    while (lo < hi) { int mid = (lo + hi) / 2; if (verts[mid].X < minX) lo = mid + 1; else hi = mid; }
+    on.Clear();
+    on.Add(a);
+    for (int k = lo; k < verts.Count && verts[k].X <= maxX; k++)
+    {
+      Point64 v = verts[k];
+      if (v.Y < minY || v.Y > maxY || v == a || v == b) continue;
+      if (InternalClipper.CrossProductSign(a, v, b) == 0) on.Add(v);
+    }
+    on.Add(b);
+    on.Sort((u, v) => ((Int128) (u.X - a.X) * (u.X - a.X) + (Int128) (u.Y - a.Y) * (u.Y - a.Y))
+      .CompareTo((Int128) (v.X - a.X) * (v.X - a.X) + (Int128) (v.Y - a.Y) * (v.Y - a.Y)));
+    for (int k = 0; k + 1 < on.Count; k++)
+    {
+      Point64 u = on[k], v = on[k + 1];
+      bool fwd = u.X < v.X || (u.X == v.X && u.Y < v.Y);
+      var key = fwd ? (u.X, u.Y, v.X, v.Y) : (v.X, v.Y, u.X, u.Y);
+      net[key] = net.GetValueOrDefault(key) + (fwd ? w : -w);
+    }
+  }
+  foreach (var kv in net)
+    if (kv.Value != 0) return $"edge ({kv.Key.Item1},{kv.Key.Item2})-({kv.Key.Item3},{kv.Key.Item4}) left {kv.Value}";
   return null;
 }
 
@@ -151,6 +201,28 @@ void Run(string name, Paths64 region)
   }
 }
 
+if (fam == "selftest")
+{
+  // the coverage check must catch a triangle moved by one unit (area and winding unchanged)
+  int caught = 0, tried = 0;
+  for (int seed = first; seed <= last; seed++)
+  {
+    Paths64 g = Grid(seed);
+    if (g.Count == 0 || Clipper.Triangulate(g, out Paths64 tris, false) != TriangulateResult.success) continue;
+    Clipper64 c = new() { PreserveCollinear = true };
+    c.AddSubject(g);
+    Paths64 rings = new();
+    c.Execute(ClipType.Union, FillRule.EvenOdd, rings);
+    Int128 ra = 0; foreach (Path64 p in rings) ra += Twice(p);
+    int k = seed % tris.Count;
+    tris[k] = Clipper.TranslatePath(tris[k], 1, 0);
+    tried++;
+    if (ChainMismatch(rings, ra < 0, tris) != null) caught++;
+    else Console.WriteLine($"MISSED grid {seed}");
+  }
+  Console.WriteLine($"selftest: {caught} of {tried} moved triangles caught");
+  return;
+}
 if (fam == "review")
 {
   Run("review1", new Paths64 { Clipper.MakePath(new long[] { 14000,4000, 12000,7000, 11286,5929, 10000,7000, 8000,5333, 8000,7000, 6000,7000, 6000,5000,

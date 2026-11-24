@@ -1,0 +1,2 @@
+# saved-Cad-fillet-twice-007-0 decPlaces=6 delaunay=true  (a SketchDraw drawing saved in Cad_fillet_twice_007.json (sketch 0 in the file); sketch tolerance 0.028284271247461898 mm; 1 paths, 4 points)
+0,100 0,0 99.99999999999999,1.4210854715202004E-14 99.99999999999999,100

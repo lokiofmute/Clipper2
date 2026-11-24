@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Benchmarks for Clipper.Triangulate, not part of the solution or the package. See README.md.
+       It builds against the USINGZ project, which is what the Clipper2 package ships. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <Optimize>true</Optimize>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\USINGZ\Clipper2Lib_Z.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="inputs\**\*.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
