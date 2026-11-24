@@ -1,0 +1,23 @@
+name: C#
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    name: test-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: |
+          8.0.x
+          10.0.x
+    - name: Test (plain and USINGZ)
+      run: dotnet test CSharp/Clipper2.sln -c Release
+    - name: Pack
+      run: dotnet pack CSharp/USINGZ/Clipper2Lib_Z.csproj -c Release -o CSharp/artifacts

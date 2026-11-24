@@ -11,7 +11,7 @@ In 2026, the original repository at [https://github.com/AngusJohnson/Clipper2](h
 ### Compilers
 <b>Clipper2</b> is written in [C++](https://github.com/PolyClipping/Clipper2/tree/main/CPP) and requires C++17. The library can also be accessed from other languages by dynamically linking to exported functions in the [C++ compiled Clipper2 library](https://github.com/PolyClipping/Clipper2/tree/main/DLL).
 
-The C# and Delphi versions of Clipper2 remain available in the archived [original repository](https://github.com/AngusJohnson/Clipper2).
+A pure C# version, kept in step with this fork's C++ engine and packaged as `Clipper2` with Z support, is in [CSharp](CSharp/README.md). The Delphi version remains available in the archived [original repository](https://github.com/AngusJohnson/Clipper2).
 
 ### Documentation
 

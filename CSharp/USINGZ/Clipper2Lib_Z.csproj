@@ -1,18 +1,50 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- The Walrus fork's Clipper2 package: built with USINGZ, same assembly name,
+       namespace and strong name as the upstream Clipper2 2.0.0 package. -->
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <DefineConstants>$(DefineConstants);USINGZ</DefineConstants>
+    <AssemblyName>Clipper2Lib</AssemblyName>
+    <RootNamespace>Clipper2Lib</RootNamespace>
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>..\Clipper2Lib\Clipper2.snk</AssemblyOriginatorKeyFile>
     <DelaySign>false</DelaySign>
     <IsPublishable>false</IsPublishable>
+    <NoWin32Manifest>true</NoWin32Manifest>
+
+    <PackageId>Clipper2</PackageId>
+    <Version>2.1.0-walrus.1</Version>
+    <Title>Clipper2</Title>
+    <Authors>Angus Johnson</Authors>
+    <Description>Polygon Clipping and Offsetting Library (Walrus fork, built with USINGZ)</Description>
+    <Copyright>Copyright © 2010-2025</Copyright>
+    <PackageProjectUrl>https://github.com/PolyClipping/Clipper2/wiki</PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/PolyClipping/Clipper2</RepositoryUrl>
+    <PackageLicenseFile>License.txt</PackageLicenseFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>geometry polygon clipping inflate intersection union difference offsetting boolean-operations</PackageTags>
+    <PackageReleaseNotes>2.1.0-walrus.1 (Walrus fork of Clipper2 2.0.0)
+Built with USINGZ: Point64 and PointD carry Z, and Z is kept through Booleans and offsets.
+Ports the fork's C++ engine changes; on the shared test data the output is byte-identical to the C++ library:
+- engine: rounded intersections and stable sorts, edges leaving a shared vertex kept in order, clamped intersections kept inside the scanbeam, cyclic split recursion guard, exact 128-bit product comparison, faster scanline handling, a Y-stripe point-in-polygon index for PolyTree nesting, and fixes for long-standing C#/C++ differences
+- offsets: per-path state, empty paths ignored, Z kept on square joins, and output always wound positively (outers positive, holes negative; negative with ReverseSolution)
+- a clipper is reusable after Execute into a PolyTree, and after a Z callback throws
+- Triangulate: the Delaunay in-circle test is exact, so ForceLegal terminates (NodeFlow N972)</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="..\Clipper2Lib\*.cs" LinkBase="Clipper2Lib" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\NuGet\icon.png" Pack="true" PackagePath="\" />
+    <None Include="..\NuGet\License.txt" Pack="true" PackagePath="\" />
+    <None Include="..\NuGet\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <ItemGroup>
