@@ -4,7 +4,7 @@ optimizing ideas:
 Where a Modern .NET 8/9+ Fork of Clipper2 Gets Huge Wins (2x–5x Faster, ~90% Less GC)
 If your workload runs heavy Boolean operations, polygon offsetting (InflatePaths), or multi-threaded CAD/CAM/GIS/game geometry, forking Clipper2’s C# internals solves four major bottlenecks:
 
-A. Eliminating Massive GC Heap Allocations (The #1 Bottleneck)
+1. Eliminating Massive GC Heap Allocations (The #1 Bottleneck)
 In C++, Clipper2 allocates input vertices in contiguous blocks, and pointers have no GC overhead. When ported to C#, every pointer became a reference-type class allocation on the GC heap:
 
 Every input vertex creates a new Vertex() heap object.
@@ -13,12 +13,8 @@ Every output vertex creates a new OutPt() doubly-linked list node on the heap.
 Clipping a complex 50,000-vertex polygon allocates hundreds of thousands of tiny heap objects, hammering the .NET Garbage Collector (Gen0/Gen1 pauses) and causing constant CPU L1/L2 cache misses from pointer-chasing across fragmented memory.
 
 Fork Optimization: Convert Vertex, Active, OutPt, and OutRec into struct nodes stored in pooled ArrayPool<T> arenas, referenced by int indices instead of object references. This drops GC allocations to near-zero and speeds up clipping by 2x–3x (and even more on multi-threaded servers where threads contend for GC).
-B. Hardware Int128 Instead of Software 128-bit Emulation
-To guarantee exactness when 64-bit coordinates multiply, Clipper2 frequently computes 128-bit cross products (InternalClipper.CrossProductSign and MultiplyUInt64).
 
-Because .NET Standard 2.0 lacked 128-bit integers, Clipper2 splits 64-bit integers into 32-bit hi/lo halves and emulates 128-bit multiplication in software (~15–20 instructions + branches).
-Fork Optimization: On .NET 7+, replacing MultiplyUInt64 with native Int128 or Math.BigMul compiles down to a single hardware CPU instruction (imul/mulx on x64, smulh on ARM64).
-C. Span<Point64> Instead of Nested List<List<Point64>>
+2. Span<Point64> Instead of Nested List<List<Point64>>
 Clipper2 defines Path64 as class Path64 : List<Point64> and Paths64 as class Paths64 : List<Path64>.
 
 Iterating path[i] incurs List<T> bounds/version overhead, and you cannot pass arrays, Memory<Point64>, stackalloc buffers, or Unity NativeArray<Point64> without copying everything into newly allocated List<Point64> objects first.
