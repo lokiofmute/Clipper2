@@ -16,7 +16,7 @@
     <NoWin32Manifest>true</NoWin32Manifest>
 
     <PackageId>Clipper2</PackageId>
-    <Version>2.1.0-walrus.2</Version>
+    <Version>2.1.0-walrus.3</Version>
     <Title>Clipper2</Title>
     <Authors>Angus Johnson</Authors>
     <Description>Polygon Clipping and Offsetting Library (Walrus fork, built with USINGZ)</Description>
@@ -28,7 +28,11 @@
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>geometry polygon clipping inflate intersection union difference offsetting boolean-operations</PackageTags>
-    <PackageReleaseNotes>2.1.0-walrus.2
+    <PackageReleaseNotes>2.1.0-walrus.3
+Triangulate allocates less: the ear index reuses entries of replaced edges instead of growing (a 150-hole
+perforated panel 6.6 -> 5.3 MB per call, large synthetic inputs up to 10x less). Output and times unchanged.
+
+2.1.0-walrus.2
 Triangulate is faster on large inputs, with the same API and guarantees (success only when the triangles
 cover the region exactly, positive triangles, locally Delaunay edges, always terminates):
 - holes are bridged through a grid, and a hole touching the outer ring at a vertex is joined there
