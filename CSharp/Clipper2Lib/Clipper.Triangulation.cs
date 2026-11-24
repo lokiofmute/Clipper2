@@ -1071,7 +1071,7 @@ namespace Clipper2Lib
         directed[key] = directed.TryGetValue(key, out int other) && other != h ? -2 : h;
       }
       int[] twin = new int[3 * count];
-      HashSet<long> undirected = new HashSet<long>();
+      HashSet<long> undirected = new HashSet<long>(3 * count);
       for (int h = 0; h < 3 * count; h++)
       {
         int u = tri[h], v = tri[Next(h)];
@@ -1128,12 +1128,14 @@ namespace Clipper2Lib
     }
 
     private const long InCircleInt128Limit = 1L << 30;
+    private const double InCircleErrorBound = 1e-12;
 
     // The exact sign of the in-circle determinant of ptD against the circle through ptA, ptB
     // and ptC (positive when ptD is inside for a counter-clockwise ptA, ptB, ptC). Evaluated
     // in double, the determinant is rounding noise for near-cocircular points with large
-    // coordinates, and edge flipping then never ended (NodeFlow N972).
-    // With every difference below 2^30 the determinant stays below 2^125, so Int128 is exact;
+    // coordinates, and edge flipping then never ended (NodeFlow N972). So double only decides
+    // when its error bound allows, and otherwise the determinant is computed exactly:
+    // with every difference below 2^30 the determinant stays below 2^125, so Int128 is exact;
     // larger differences use BigInteger.
     internal static int InCircleSign(Point64 ptA, Point64 ptB, Point64 ptC, Point64 ptD)
     {
@@ -1141,6 +1143,21 @@ namespace Clipper2Lib
       long m00 = ptA.X - ptD.X, m01 = ptA.Y - ptD.Y;
       long m10 = ptB.X - ptD.X, m11 = ptB.Y - ptD.Y;
       long m20 = ptC.X - ptD.X, m21 = ptC.Y - ptD.Y;
+
+      // first in double: the sign is certain when the determinant is further from zero than
+      // its rounding error can reach. Each difference rounds once to double (relative error
+      // 2^-53), and the products, lifts and sums add a few roundings more: the error stays
+      // below 16 * 2^-53 of the permanent (the determinant with every term made positive).
+      // The bound used is far larger, so only near-cocircular points take the exact path.
+      double a0d = m00, a1d = m01, b0d = m10, b1d = m11, c0d = m20, c1d = m21;
+      double a2d = a0d * a0d + a1d * a1d, b2d = b0d * b0d + b1d * b1d, c2d = c0d * c0d + c1d * c1d;
+      double bc = b0d * c1d - c0d * b1d, ca = c0d * a1d - a0d * c1d, ab = a0d * b1d - b0d * a1d;
+      double detd = a2d * bc + b2d * ca + c2d * ab;
+      double permanent = a2d * (Math.Abs(b0d * c1d) + Math.Abs(c0d * b1d)) +
+        b2d * (Math.Abs(c0d * a1d) + Math.Abs(a0d * c1d)) + c2d * (Math.Abs(a0d * b1d) + Math.Abs(b0d * a1d));
+      double bound = InCircleErrorBound * permanent;
+      if (detd > bound) return 1;
+      if (detd < -bound) return -1;
 
       if (Math.Abs(m00) < InCircleInt128Limit && Math.Abs(m01) < InCircleInt128Limit &&
           Math.Abs(m10) < InCircleInt128Limit && Math.Abs(m11) < InCircleInt128Limit &&

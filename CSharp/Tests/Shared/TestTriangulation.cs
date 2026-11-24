@@ -118,6 +118,50 @@ namespace Clipper2Lib.UnitTests
     }
 
     [TestMethod]
+    public void TestInCircleSignFilterAgreesWithExact()
+    {
+      // InCircleSign decides in double when its error bound allows: it must never give a sign
+      // the exact determinant doesn't. Random points at every scale (Int128 and BigInteger
+      // ranges), and cocircular points (Pythagorean triples on one radius, far from the
+      // origin), exactly and nudged by one unit, where the double determinant is rounding noise.
+      Random rng = new(20261124);
+      long[] scales = { 10, 1000, 1_000_000, 1L << 30, 1L << 40, 1L << 52, 1L << 59 };
+      foreach (long scale in scales)
+        for (int k = 0; k < 3000; k++)
+        {
+          Point64 a = RandomPoint(rng, scale), b = RandomPoint(rng, scale);
+          Point64 c = RandomPoint(rng, scale), d = RandomPoint(rng, scale);
+          Assert.AreEqual(InCircleSignReference(a, b, c, d), Delaunay.InCircleSign(a, b, c, d),
+            $"random scale {scale}");
+        }
+
+      // every (x, y) with x^2 + y^2 = R^2 from these triples, R = 5 * 13 * 17 * 25 * 29
+      long r = 5L * 13 * 17 * 25 * 29;
+      List<(long, long)> circle = new();
+      foreach ((long p, long q, long h) in new[] { (3L, 4L, 5L), (5L, 12L, 13L), (8L, 15L, 17L), (7L, 24L, 25L), (20L, 21L, 29L) })
+        foreach (long sx in new[] { -1L, 1L })
+          foreach (long sy in new[] { -1L, 1L })
+          {
+            circle.Add((sx * p * (r / h), sy * q * (r / h)));
+            circle.Add((sx * q * (r / h), sy * p * (r / h)));
+          }
+      foreach (long scale in new long[] { 1, 1000, 100_000, 10_000_000 })
+        for (int k = 0; k < 3000; k++)
+        {
+          Point64 offset = RandomPoint(rng, 1L << 50);
+          Point64 OnCircle(int i) => new(offset.X + circle[i].Item1 * scale, offset.Y + circle[i].Item2 * scale);
+          int i0 = rng.Next(circle.Count), i1 = rng.Next(circle.Count), i2 = rng.Next(circle.Count), i3 = rng.Next(circle.Count);
+          Point64 a = OnCircle(i0), b = OnCircle(i1), c = OnCircle(i2), d = OnCircle(i3);
+          Assert.AreEqual(InCircleSignReference(a, b, c, d), Delaunay.InCircleSign(a, b, c, d), $"cocircular scale {scale}");
+          Point64 nudged = new(d.X + rng.Next(-1, 2), d.Y + rng.Next(-1, 2));
+          Assert.AreEqual(InCircleSignReference(a, b, c, nudged), Delaunay.InCircleSign(a, b, c, nudged), $"nudged scale {scale}");
+        }
+    }
+
+    private static Point64 RandomPoint(Random rng, long scale) =>
+      new((long) ((rng.NextDouble() * 2 - 1) * scale), (long) ((rng.NextDouble() * 2 - 1) * scale));
+
+    [TestMethod]
     public void TestInCircleSignIsExact()
     {
       // cocircular points (on x^2 + y^2 = 5^2 * k^2, shifted far from the origin) must give 0,
