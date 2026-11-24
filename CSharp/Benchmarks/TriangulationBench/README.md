@@ -126,7 +126,7 @@ What NodeFlow sees (Delaunay on): perforated x18.5 and slice-Plate x2.4, every o
 Known costs of walrus.2:
 
 - With Delaunay off, several small real inputs are 10-20% slower (slice-base-tube-plate-001 641 -> 832 us, saved-Cad-test-006-0 24.5 -> 30.2 us). Probably the clip order of `145e38b`; NodeFlow doesn't use this mode.
-- comb-10k allocates about 210 MB per call against 15-21 MB on walrus.1, at the same time. Once the teeth are clipped, the base is a strip with collinear top vertices, so any triangulation is a fan of long diagonals, and the ear index registers each of them in hundreds of cells. Synthetic; NodeFlow's comb (84 points) is fine.
+- comb-10k allocated about 210 MB per call against 15-21 MB on walrus.1: the ear index registers each long diagonal of its base fan in hundreds of grid cells, and entries of replaced edges were never reused. Fixed after these runs (free list plus a sweep before the storage grows): comb-10k 215 -> 21 MB, plate-500-holes 95 -> 58 MB, perforated 6.6 -> 5.3 MB, output bit-identical (`hash`), same times.
 - star-10k: 30% of the time is the up-front Union.
 
 Steps: `858a3f7` bridging grid and touching holes, `f13a15b` ear index, `7eda2f5` half-edge Legalize, `a21a0ee` SplitPinches prefix sums, `145e38b` clip order, `63e16aa` in-circle filter. Each commit message has its own before/after numbers (from `quick`, on a loaded machine).

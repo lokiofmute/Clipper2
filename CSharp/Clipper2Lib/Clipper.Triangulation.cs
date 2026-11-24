@@ -158,43 +158,79 @@ namespace Clipper2Lib
       }
     }
 
-    // a linked list of items per grid cell
+    // a linked list of items per grid cell. With a stale test, entries that went stale are
+    // reused: callers unlink the ones they meet, and when the storage is full, a sweep of all
+    // cells frees the rest before it grows. The ear index replaces edges all the time and
+    // registers a long diagonal in hundreds of cells, many never visited again, so without
+    // the sweep its storage would follow every entry ever added instead of the live ones.
     private sealed class CellLists<T>
     {
       private readonly int[] head;
       private int[] link;
       private T[] items;
       private int count;
+      private int free = -1; // freed entries, chained through link
+      private int freed;     // entries on the free list
+      private readonly Func<T, bool>? stale;
 
-      public CellLists(int cells, int capacity)
+      public CellLists(int cells, int capacity, Func<T, bool>? stale = null)
       {
         head = new int[cells];
         Array.Fill(head, -1);
         link = new int[Math.Max(capacity, 4)];
         items = new T[link.Length];
+        this.stale = stale;
       }
 
       public void Add(int cell, T item)
       {
-        if (count == link.Length)
+        // a sweep costs one pass over the storage; growing unless it freed a quarter of it
+        // keeps that at a constant per added entry
+        if (free < 0 && count == link.Length && (stale == null || Sweep() < count / 4))
         {
           Array.Resize(ref link, count * 2);
           Array.Resize(ref items, count * 2);
         }
-        items[count] = item;
-        link[count] = head[cell];
-        head[cell] = count++;
+        int e;
+        if (free >= 0)
+        {
+          e = free;
+          free = link[e];
+          freed--;
+        }
+        else e = count++;
+        items[e] = item;
+        link[e] = head[cell];
+        head[cell] = e;
       }
 
       public int First(int cell) => head[cell];
       public int Next(int entry) => link[entry];
       public T this[int entry] => items[entry];
 
-      // takes entry out of its cell's list, where prev is the entry before it (or -1)
+      // takes entry out of its cell's list, where prev is the entry before it (or -1), and
+      // frees it: read Next(entry) before calling this
       public void Unlink(int cell, int prev, int entry)
       {
         if (prev < 0) head[cell] = link[entry];
         else link[prev] = link[entry];
+        items[entry] = default!;
+        link[entry] = free;
+        free = entry;
+        freed++;
+      }
+
+      // unlinks every stale entry; returns how many entries are free afterwards
+      private int Sweep()
+      {
+        for (int cell = 0; cell < head.Length; cell++)
+          for (int e = head[cell], prev = -1, next; e >= 0; e = next)
+          {
+            next = link[e];
+            if (stale!(items[e])) Unlink(cell, prev, e);
+            else prev = e;
+          }
+        return freed;
       }
     }
 
@@ -871,8 +907,8 @@ namespace Clipper2Lib
           p = p.next;
         } while (p != ring);
         grid = new Grid(left, top, right, bottom, n);
-        vertices = new CellLists<Node>(grid.Cells, n);
-        edges = new CellLists<(Node, Node)>(grid.Cells, 4 * n);
+        vertices = new CellLists<Node>(grid.Cells, n); // filled once, never grows
+        edges = new CellLists<(Node, Node)>(grid.Cells, 4 * n, e => e.Item1.removed || e.Item1.next != e.Item2);
         do
         {
           vertices.Add(grid.Cell(p.pt), p);
@@ -902,16 +938,18 @@ namespace Clipper2Lib
         {
           // entries of removed vertices and replaced edges are dropped as they're met: they
           // never come back, as a removed node is never linked in again
-          for (int e = vertices.First(cell), prev = -1; e >= 0; e = vertices.Next(e))
+          for (int e = vertices.First(cell), prev = -1, next; e >= 0; e = next)
           {
+            next = vertices.Next(e);
             Node p = vertices[e];
             if (p.removed) { vertices.Unlink(cell, prev, e); continue; }
             prev = e;
             if (p == ear || p == ear.prev || p == ear.next) continue;
             if (BlocksEar(a, b, c, p, minX, maxX, minY, maxY)) return false;
           }
-          for (int e = edges.First(cell), prev = -1; e >= 0; e = edges.Next(e))
+          for (int e = edges.First(cell), prev = -1, next; e >= 0; e = next)
           {
+            next = edges.Next(e);
             (Node s, Node t) = edges[e];
             if (s.removed || s.next != t) { edges.Unlink(cell, prev, e); continue; }
             prev = e;
