@@ -153,6 +153,8 @@ namespace Clipper2Lib
     public bool isOpen;
     public List<int>? splits;
     public OutRec? recursiveSplit;
+    // Lazily built during PolyTree nesting; only valid once pts is stable.
+    public StripeIndex? pipIndex;
   }
 
   internal class HorzSegment
@@ -376,6 +378,11 @@ namespace Clipper2Lib
     internal bool _using_polytree;
     internal bool _succeeded;
     public bool PreserveCollinear { get; set; }
+
+    // Ring edge count below which building a StripeIndex doesn't pay off, so nesting
+    // uses brute force instead; 64 is an empirical break-even. A testing knob: high
+    // forces brute-force nesting, low forces stripe indexing.
+    internal int PipIndexThreshold { get; set; } = 64;
     public bool ReverseSolution { get; set; }
 
 #if USINGZ
@@ -2843,6 +2850,48 @@ private void DoHorizontal(Active horz)
       return InternalClipper.Path2ContainsPath1(GetCleanPath(op1), GetCleanPath(op2)); // (#973)
     }
 
+    // Path1InsidePath2 variant using a StripeIndex cached on the owner. Small owners
+    // and the ambiguity fallback defer to the brute-force overload, so results match.
+    private static bool Path1InsidePath2Indexed(OutPt op1, OutRec owner, int indexThreshold)
+    {
+      if (owner.path.Count <= indexThreshold)
+        return Path1InsidePath2(op1, owner.pts!);
+
+      if (owner.pipIndex == null)
+      {
+        // build into a local first so a throw cannot cache a partial index
+        StripeIndex index = new StripeIndex();
+        index.BuildFromRing(owner.pts);
+        owner.pipIndex = index;
+      }
+
+      // Empty means the index declined this ring (see StripeIndex.Build).
+      if (owner.pipIndex.Empty)
+        return Path1InsidePath2(op1, owner.pts!);
+
+      PointInPolygonResult pip = PointInPolygonResult.IsOn;
+      OutPt op = op1;
+      do
+      {
+        switch (owner.pipIndex.PointInPolygon(op.pt))
+        {
+          case PointInPolygonResult.IsOutside:
+            if (pip == PointInPolygonResult.IsOutside) return false;
+            pip = PointInPolygonResult.IsOutside;
+            break;
+          case PointInPolygonResult.IsInside:
+            if (pip == PointInPolygonResult.IsInside) return true;
+            pip = PointInPolygonResult.IsInside;
+            break;
+          default: break;
+        }
+        op = op.next!;
+      } while (op != op1);
+
+      // ambiguous, defer to the exact cleaned-path test
+      return InternalClipper.Path2ContainsPath1(GetCleanPath(op1), GetCleanPath(owner.pts!)); // (#973)
+    }
+
     private static void MoveSplits(OutRec fromOr, OutRec toOr)
     {
       if (fromOr.splits == null) return;
@@ -3196,7 +3245,7 @@ private void DoHorizontal(Active horz)
 
         if (!CheckBounds(split) ||
             !split.bounds.Contains(outrec.bounds) ||
-            !Path1InsidePath2(outrec.pts!, split.pts!)) continue;
+            !Path1InsidePath2Indexed(outrec.pts!, split, PipIndexThreshold)) continue;
 
         if (!IsValidOwner(outrec, split)) // split is owned by outrec (#957)
           split.owner = outrec.owner;
@@ -3219,7 +3268,7 @@ private void DoHorizontal(Active horz)
           CheckSplitOwner(outrec, outrec.owner.splits)) break; 
         if (outrec.owner.pts != null && CheckBounds(outrec.owner) &&
           outrec.owner.bounds.Contains(outrec.bounds) &&
-          Path1InsidePath2(outrec.pts!, outrec.owner.pts!)) break;
+          Path1InsidePath2Indexed(outrec.pts!, outrec.owner, PipIndexThreshold)) break;
         outrec.owner = outrec.owner.owner;
       }
 

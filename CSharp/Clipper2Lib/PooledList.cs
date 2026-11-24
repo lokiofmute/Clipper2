@@ -106,6 +106,7 @@ namespace Clipper2Lib
         outRec.isOpen = false;
         outRec.splits?.Clear();
         outRec.recursiveSplit = null;
+        outRec.pipIndex = null;
       }
       _size++;
       return outRec;
