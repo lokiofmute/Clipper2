@@ -10,6 +10,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 
 namespace Clipper2Lib
 {
@@ -474,7 +475,8 @@ namespace Clipper2Lib
       if (InternalClipper.CrossProductSign(vertA.pt, edge.vL.pt, edge.vR.pt) == 0)
         return;
 
-      double ictResult = InCircleTest(vertA.pt, edge.vL.pt, edge.vR.pt, vertB.pt);
+      // exact, so near-cocircular points can't flip an edge back and forth forever (N972)
+      int ictResult = InCircleSign(vertA.pt, edge.vL.pt, edge.vR.pt, vertB.pt);
       if (ictResult == 0 ||
           (RightTurning(vertA.pt, edge.vL.pt, edge.vR.pt) == (ictResult < 0)))
         return;
@@ -1066,23 +1068,37 @@ namespace Clipper2Lib
       return res;
     }
 
-    private static double InCircleTest(in Point64 ptA, in Point64 ptB, in Point64 ptC, in Point64 ptD)
+    private const long InCircleInt128Limit = 1L << 30;
+
+    // The exact sign of the in-circle determinant of ptD against the circle through ptA, ptB
+    // and ptC (positive when ptD is inside for a counter-clockwise ptA, ptB, ptC). Evaluated
+    // in double, the determinant is rounding noise for near-cocircular points with large
+    // coordinates, and ForceLegal then flipped an edge back and forth forever (NodeFlow N972).
+    // With every difference below 2^30 the determinant stays below 2^125, so Int128 is exact;
+    // larger differences use BigInteger.
+    internal static int InCircleSign(Point64 ptA, Point64 ptB, Point64 ptC, Point64 ptD)
     {
-      double m00 = (double) (ptA.X - ptD.X);
-      double m01 = (double) (ptA.Y - ptD.Y);
-      double m02 = Sqr(m00) + Sqr(m01);
+      // Clipper's coordinates are within +/-2^61, so these differences can't overflow
+      long m00 = ptA.X - ptD.X, m01 = ptA.Y - ptD.Y;
+      long m10 = ptB.X - ptD.X, m11 = ptB.Y - ptD.Y;
+      long m20 = ptC.X - ptD.X, m21 = ptC.Y - ptD.Y;
 
-      double m10 = (double) (ptB.X - ptD.X);
-      double m11 = (double) (ptB.Y - ptD.Y);
-      double m12 = Sqr(m10) + Sqr(m11);
-
-      double m20 = (double) (ptC.X - ptD.X);
-      double m21 = (double) (ptC.Y - ptD.Y);
-      double m22 = Sqr(m20) + Sqr(m21);
-
-      return m00 * (m11 * m22 - m21 * m12) -
-             m10 * (m01 * m22 - m21 * m02) +
-             m20 * (m01 * m12 - m11 * m02);
+      if (Math.Abs(m00) < InCircleInt128Limit && Math.Abs(m01) < InCircleInt128Limit &&
+          Math.Abs(m10) < InCircleInt128Limit && Math.Abs(m11) < InCircleInt128Limit &&
+          Math.Abs(m20) < InCircleInt128Limit && Math.Abs(m21) < InCircleInt128Limit)
+      {
+        Int128 a0 = m00, a1 = m01, b0 = m10, b1 = m11, c0 = m20, c1 = m21;
+        Int128 a2 = a0 * a0 + a1 * a1, b2 = b0 * b0 + b1 * b1, c2 = c0 * c0 + c1 * c1;
+        Int128 det = a0 * (b1 * c2 - c1 * b2) - b0 * (a1 * c2 - c1 * a2) + c0 * (a1 * b2 - b1 * a2);
+        return Int128.Sign(det);
+      }
+      else
+      {
+        BigInteger a0 = m00, a1 = m01, b0 = m10, b1 = m11, c0 = m20, c1 = m21;
+        BigInteger a2 = a0 * a0 + a1 * a1, b2 = b0 * b0 + b1 * b1, c2 = c0 * c0 + c1 * c1;
+        BigInteger det = a0 * (b1 * c2 - c1 * b2) - b0 * (a1 * c2 - c1 * a2) + c0 * (a1 * b2 - b1 * a2);
+        return det.Sign;
+      }
     }
 
     private static double ShortestDistFromSegment(in Point64 pt, in Point64 segPt1, in Point64 segPt2)
