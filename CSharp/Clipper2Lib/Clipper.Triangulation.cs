@@ -480,21 +480,6 @@ namespace Clipper2Lib
       return true;
     }
 
-    private static Int128 TwiceArea(Node start, Node end)
-    {
-      // the loop start .. end, closed back to start
-      Int128 sum = 0;
-      Node p = start;
-      while (true)
-      {
-        Node q = (p == end) ? start : p.next;
-        sum += (Int128) p.pt.X * q.pt.Y - (Int128) q.pt.X * p.pt.Y;
-        if (p == end) break;
-        p = p.next;
-      }
-      return sum;
-    }
-
     // Splits a ring wherever it passes the same point twice and both loops there enclose
     // area (pieces touching at a point). Loops without area are dropped. A loop of negative
     // area is a hole attached at that point, so the ring isn't split there.
@@ -503,27 +488,51 @@ namespace Clipper2Lib
       List<Node> done = new List<Node>();
       Stack<Node> todo = new Stack<Node>();
       todo.Push(ring);
+      List<Node> nodes = new List<Node>();
+      List<Int128> prefix = new List<Int128>();
+      List<int> sameNext = new List<int>(), groupFirst = new List<int>(), groupLast = new List<int>();
+      Dictionary<(long, long), int> group = new Dictionary<(long, long), int>();
       while (todo.Count > 0)
       {
         Node start = todo.Pop();
-        Dictionary<(long, long), List<Node>> seen = new Dictionary<(long, long), List<Node>>();
+        // the nodes in ring order, with the twice-area of the edges before each (prefix[i]
+        // runs from nodes[0] to nodes[i]), and the nodes at each position chained in ring
+        // order, positions in the order they're first met
+        nodes.Clear(); prefix.Clear(); sameNext.Clear(); groupFirst.Clear(); groupLast.Clear();
+        group.Clear();
+        Int128 sum = 0;
         Node p = start;
         do
         {
-          if (!seen.TryGetValue((p.pt.X, p.pt.Y), out List<Node>? list))
-            seen.Add((p.pt.X, p.pt.Y), list = new List<Node>());
-          list.Add(p);
+          int i = nodes.Count;
+          nodes.Add(p);
+          prefix.Add(sum);
+          sum += (Int128) p.pt.X * p.next.pt.Y - (Int128) p.next.pt.X * p.pt.Y;
+          sameNext.Add(-1);
+          if (group.TryGetValue((p.pt.X, p.pt.Y), out int g))
+          {
+            sameNext[groupLast[g]] = i;
+            groupLast[g] = i;
+          }
+          else
+          {
+            group.Add((p.pt.X, p.pt.Y), groupFirst.Count);
+            groupFirst.Add(i);
+            groupLast.Add(i);
+          }
           p = p.next;
         } while (p != start);
 
         bool split = false;
-        foreach (List<Node> list in seen.Values)
+        foreach (int first in groupFirst)
         {
-          for (int i = 0; i < list.Count && !split; i++)
-            for (int j = i + 1; j < list.Count && !split; j++)
+          for (int i = first; i >= 0 && !split; i = sameNext[i])
+            for (int j = sameNext[i]; j >= 0 && !split; j = sameNext[j])
             {
-              Node a = list[i], b = list[j];
-              Int128 area1 = TwiceArea(a, b.prev), area2 = TwiceArea(b, a.prev);
+              Node a = nodes[i], b = nodes[j];
+              // a and b share a position, so the loop a .. b.prev closed back to a has the
+              // twice-area of the edges from a to b, and the loop b .. a.prev the rest
+              Int128 area1 = prefix[j] - prefix[i], area2 = sum - area1;
               if (area1 < 0 || area2 < 0) continue;
               // loop 1: a .. b.prev, loop 2: b .. a.prev
               Node aPrev = a.prev, bPrev = b.prev;
